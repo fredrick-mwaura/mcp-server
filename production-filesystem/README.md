@@ -1,26 +1,16 @@
 # mcp-filesystem-server — Production MCP File System Server
 
-**Phase 1 of the PRODUCTION_PLAN.** A read-only, workspace-scoped MCP server
-that lists files for an AI assistant — built to production standards so it can
-(and will) grow write tools, remote HTTP transport, and auth.
+A workspace-scoped, production-grade MCP server built for software engineers
+and autonomous SWE-bench benchmark workflows. It provides token-preserving code
+inspection, surgical editing, pre-commit AST syntax validation, and native Git integration.
 
-> 📚 This project is the **second half of an MCP course**.
-> - Lesson 1 (`../terminal_server.py`): a *single file* demo server.
-> - This project: what a **real** server looks like — a Python *package* with a
->   security layer, typed errors, structured logs, and tests.
-> - Read `PRODUCTION_PLAN.md` for the full architecture & roadmap.
+> 📚 **Complete Technical Documentation**:
+> Deep architecture and algorithm specifications are documented in **[`../docs/`](../docs/README.md)**:
+> - **[`Architecture & Layering`](../docs/architecture.md)**: Modular design, closure-based DI, and VFS isolation.
+> - **[`Token Economics & Cost Optimization`](../docs/token_economics.md)**: Line slicing, AST outlines, and 90-98% token reduction.
+> - **[`Security & VFS Invariants`](../docs/security_and_vfs.md)**: Single chokepoint gate, atomic swap writes, and scoped trash design.
+> - **[`Git & SWE-Bench Lifecycle`](../docs/git_and_swebench.md)**: Patch export pipeline, status parsing, and autonomous rollback.
 
----
-
-## What Phase 1 does
-
-One tool, deliberately:
-
-| Tool | What it does | Safety guarantee |
-|---|---|---|
-| `list_directory(path)` | Lists files/folders under an **allowed root** | Paths are normalized, symlink-resolved, and zone-checked. Anything outside the roots → typed `path_not_allowed` error. |
-
-**Read-only by construction.** There are no write tools to misconfigure.
 
 ## The security design (read this once)
 

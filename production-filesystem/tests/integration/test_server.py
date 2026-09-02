@@ -44,18 +44,28 @@ def _server_for(root: Path):
 # Phase 1 tests (list_directory) — preserved from original
 # =================================================================
 
-def test_server_exposes_phase1_and_phase2_tools(tmp_path: Path) -> None:
+def test_server_exposes_all_tools(tmp_path: Path) -> None:
     async def _list():
         tools = await _server_for(tmp_path).list_tools()
         return sorted(t.name for t in tools)
 
     tool_names = asyncio.run(_list())
-    # Phase 1 + Phase 2 tools
-    assert "list_directory" in tool_names
-    assert "read_file" in tool_names
-    assert "find_files" in tool_names
-    assert "grep_search" in tool_names
-    assert "symbol_outline" in tool_names
+    expected = [
+        "apply_patch",
+        "delete_entry",
+        "edit_block",
+        "export_swebench_patch",
+        "find_files",
+        "git_diff",
+        "git_status",
+        "grep_search",
+        "list_directory",
+        "read_file",
+        "revert_file",
+        "symbol_outline",
+        "write_file",
+    ]
+    assert tool_names == expected
 
 
 def test_list_directory_returns_entries(tmp_path: Path) -> None:

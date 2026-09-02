@@ -11,6 +11,8 @@ be reasoned about and tested in isolation:
         navigation.py  ->  list_directory, read_file (line-sliced), find_files
         search.py      ->  grep_search (ripgrep-accelerated code search)
         outline.py     ->  symbol_outline (AST structural map)
+        editing.py     ->  edit_block, write_file, apply_patch, delete_entry
+        git_ops.py     ->  git_status, git_diff, export_swebench_patch, revert_file
     errors.py   ->  typed errors the AI model can actually understand
     telemetry.py->  JSON logging (stderr, never stdout - same rule as Lesson 1)
     server.py   ->  assembles an MCPServer from the pieces
@@ -19,4 +21,5 @@ The rule that keeps this safe: *no module except vfs.py imports os/fs calls,
 and no path reaches vfs.py without first passing through security.*
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
+

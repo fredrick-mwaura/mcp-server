@@ -346,6 +346,19 @@ def delete_to_trash(canonical_path: Path, root: Path) -> dict[str, object]:
     if not os.path.lexists(canonical_path):
         raise PathNotFoundError(str(canonical_path))
 
+    # ARCHITECTURAL DECISION - Why <root>/.trash/ instead of the send2trash package:
+    # 1. Security boundary: send2trash targets the OS-wide trash (~/.Trash or
+    #    ~/.local/share/Trash). Moving files there violates our single-gate
+    #    invariant (never escape allowed roots). Furthermore, if the agent could
+    #    inspect trash to restore a file, opening ~/.Trash would expose the user's
+    #    entire personal deleted file history to the LLM context.
+    # 2. SWE & CI/Docker sandboxes: Headless Linux servers, GitHub Actions
+    #    runners, and evaluation containers rarely run desktop trash daemons.
+    #    send2trash either raises TrashPermissionError or deletes permanently.
+    # 3. Autonomous recovery: Keeping the trash buffer inside the allowed root
+    #    enables the LLM to inspect, read, or restore the file without human
+    #    intervention and without breaching the security sandbox.
+    # 4. Zero external dependencies: Uses standard library pathlib + shutil.
     trash_dir = root / ".trash"
     trash_dir.mkdir(exist_ok=True)
 

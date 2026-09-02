@@ -28,7 +28,7 @@ from mcp_fs.config import Settings
 from mcp_fs.errors import FileSystemError, ReadOnlyModeError
 from mcp_fs.security import canonical_root, resolve_allowed_path, validate_python_syntax
 from mcp_fs.telemetry import configure_logging
-from mcp_fs.tools import navigation, search, outline, editing
+from mcp_fs.tools import navigation, search, outline, editing, git_ops
 from mcp_fs import __version__
 
 # --- SDK v2 --------------------------------------------------------------
@@ -97,9 +97,10 @@ def build_server(settings: Settings) -> MCPServer:
     instructions = (
         "This server provides secure, token-efficient file system access. "
         "Read tools: list_directory, read_file (line-sliced), find_files, "
-        "grep_search (ripgrep-accelerated), symbol_outline (AST map). "
+        "grep_search (ripgrep-accelerated), symbol_outline (AST map), "
+        "git_status, git_diff, export_swebench_patch. "
         "Write tools: edit_block (surgical), write_file (atomic), "
-        "apply_patch (unified diff), delete_entry (safe trash). "
+        "apply_patch (unified diff), delete_entry (safe trash), revert_file (rollback to HEAD). "
         f"{mode_desc} Only the following root(s) may be accessed; "
         "any other path is rejected:\n"
         + "\n".join(f"- {r}" for r in root_strings)
@@ -594,6 +595,195 @@ def build_server(settings: Settings) -> MCPServer:
             return exc.to_result()
         except Exception as exc:  # noqa: BLE001
             logger.exception("unexpected_tool_error", extra={"tool": "delete_entry"})
+            return {"error_code": "internal_error", "error": f"Unexpected error: {exc}"}
+
+    # =================================================================
+    # TOOL: git_status (Phase 4 — Git & SWE-bench)
+    # =================================================================
+    @mcp.tool()
+    def git_status(
+        path: str = ".",
+    ) -> dict[str, object]:
+        """Inspect Git repository status (branch, staged, unstaged, untracked).
+
+        Returns a structured summary of working tree and index status without
+        requiring raw terminal commands. The path must resolve inside an
+        allowed root and belong to a git repository.
+
+        Args:
+            path: Directory or file within the git repository (default: ".").
+
+        Returns:
+            A dictionary with branch name, upstream info, ahead/behind counts,
+            staged modifications, unstaged changes, and untracked files.
+        """
+        started = time.perf_counter()
+        logger.info("tool_call", extra={"tool": "git_status", "path": path})
+        try:
+            canonical = resolve_allowed_path(path, root_strings, must_exist=True)
+            result = git_ops.git_status(canonical)
+            logger.info(
+                "tool_result",
+                extra={"tool": "git_status", "ok": True,
+                       "branch": result.get("branch"),
+                       "is_clean": result.get("is_clean"),
+                       "duration_ms": _ms_since(started)},
+            )
+            return result
+        except FileSystemError as exc:
+            logger.info(
+                "tool_result",
+                extra={"tool": "git_status", "ok": False,
+                       "error_code": exc.code, "duration_ms": _ms_since(started)},
+            )
+            return exc.to_result()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("unexpected_tool_error", extra={"tool": "git_status"})
+            return {"error_code": "internal_error", "error": f"Unexpected error: {exc}"}
+
+    # =================================================================
+    # TOOL: git_diff (Phase 4 — Git & SWE-bench)
+    # =================================================================
+    @mcp.tool()
+    def git_diff(
+        path: str = ".",
+        cached: bool = False,
+        target: str | None = None,
+        paths: list[str] | None = None,
+        max_lines: int = 500,
+    ) -> dict[str, object]:
+        """Generate a token-conscious unified Git diff.
+
+        Produces a diff against HEAD, against the index (cached=True), or
+        against a specific revision/branch. Enforces a maximum line cap to
+        protect LLM context budgets from massive diff explosions.
+
+        Args:
+            path:      Directory or file within the git repository (default: ".").
+            cached:    If True, diff staged changes against HEAD.
+            target:    Optional commit, branch, or tag (e.g. 'HEAD~1', 'main').
+            paths:     Optional list of file paths to scope the diff.
+            max_lines: Maximum diff lines to return before truncating (default: 500).
+
+        Returns:
+            A dictionary with diff text, files changed, insertion/deletion stats,
+            and whether the output was truncated.
+        """
+        started = time.perf_counter()
+        logger.info("tool_call", extra={"tool": "git_diff", "path": path, "cached": cached, "target": target})
+        try:
+            canonical = resolve_allowed_path(path, root_strings, must_exist=True)
+            result = git_ops.git_diff(
+                canonical,
+                cached=cached,
+                target=target,
+                paths=paths,
+                max_lines=max_lines,
+            )
+            logger.info(
+                "tool_result",
+                extra={"tool": "git_diff", "ok": True,
+                       "files_changed": result.get("files_changed"),
+                       "total_lines": result.get("total_lines"),
+                       "duration_ms": _ms_since(started)},
+            )
+            return result
+        except FileSystemError as exc:
+            logger.info(
+                "tool_result",
+                extra={"tool": "git_diff", "ok": False,
+                       "error_code": exc.code, "duration_ms": _ms_since(started)},
+            )
+            return exc.to_result()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("unexpected_tool_error", extra={"tool": "git_diff"})
+            return {"error_code": "internal_error", "error": f"Unexpected error: {exc}"}
+
+    # =================================================================
+    # TOOL: export_swebench_patch (Phase 4 — Git & SWE-bench)
+    # =================================================================
+    @mcp.tool()
+    def export_swebench_patch(
+        path: str = ".",
+    ) -> dict[str, object]:
+        """Export standardized patch for SWE-bench evaluation and submission.
+
+        Exports the exact `git diff HEAD` string encompassing all staged and
+        unstaged changes against the base commit. Audits the repository for
+        untracked files and warns if any are omitted.
+
+        Args:
+            path: Directory or file within the git repository (default: ".").
+
+        Returns:
+            A dictionary containing the unified patch string, change metrics,
+            and warnings about untracked files.
+        """
+        started = time.perf_counter()
+        logger.info("tool_call", extra={"tool": "export_swebench_patch", "path": path})
+        try:
+            canonical = resolve_allowed_path(path, root_strings, must_exist=True)
+            result = git_ops.export_swebench_patch(canonical)
+            logger.info(
+                "tool_result",
+                extra={"tool": "export_swebench_patch", "ok": True,
+                       "files_changed": result.get("files_changed"),
+                       "is_empty": result.get("is_empty"),
+                       "duration_ms": _ms_since(started)},
+            )
+            return result
+        except FileSystemError as exc:
+            logger.info(
+                "tool_result",
+                extra={"tool": "export_swebench_patch", "ok": False,
+                       "error_code": exc.code, "duration_ms": _ms_since(started)},
+            )
+            return exc.to_result()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("unexpected_tool_error", extra={"tool": "export_swebench_patch"})
+            return {"error_code": "internal_error", "error": f"Unexpected error: {exc}"}
+
+    # =================================================================
+    # TOOL: revert_file (Phase 4 — Git & SWE-bench)
+    # =================================================================
+    @mcp.tool()
+    def revert_file(
+        path: str,
+    ) -> dict[str, object]:
+        """Revert uncommitted modifications to a file back to HEAD.
+
+        Restores a modified or deleted tracked file back to its clean HEAD
+        state. If the file is untracked, it is safely moved to the .trash/
+        buffer. Requires read-write mode.
+
+        Args:
+            path: The file path to revert back to HEAD.
+
+        Returns:
+            A dictionary describing the revert action taken.
+        """
+        started = time.perf_counter()
+        logger.info("tool_call", extra={"tool": "revert_file", "path": path})
+        try:
+            _require_write_mode("revert_file")
+            canonical = resolve_allowed_path(path, root_strings, must_exist=True)
+            result = git_ops.revert_file(canonical)
+            logger.info(
+                "tool_result",
+                extra={"tool": "revert_file", "ok": True,
+                       "action": result.get("action"),
+                       "duration_ms": _ms_since(started)},
+            )
+            return result
+        except FileSystemError as exc:
+            logger.info(
+                "tool_result",
+                extra={"tool": "revert_file", "ok": False,
+                       "error_code": exc.code, "duration_ms": _ms_since(started)},
+            )
+            return exc.to_result()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("unexpected_tool_error", extra={"tool": "revert_file"})
             return {"error_code": "internal_error", "error": f"Unexpected error: {exc}"}
 
     return mcp
