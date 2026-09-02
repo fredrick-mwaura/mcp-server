@@ -1,0 +1,12 @@
+# Python virtual environment (created by `python3 -m venv .venv`)
+.venv/
+venv/
+
+# Python bytecode caches - these are auto-generated and never belong in git
+__pycache__/
+*.py[cod]
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/

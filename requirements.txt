@@ -1,0 +1,9 @@
+# -----------------------------------------------------------------------------
+# Dependencies for the "Terminal Server" MCP course example.
+#
+# Install them with:  pip install -r requirements.txt
+# -----------------------------------------------------------------------------
+
+# The official MCP (Model Context Protocol) SDK for Python.
+# It provides the MCPServer class that does all the protocol heavy lifting.
+mcp>=1.0.0
