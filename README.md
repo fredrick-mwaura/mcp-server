@@ -2,7 +2,8 @@
 
 > **A beginner-friendly Model Context Protocol (MCP) server that lets an AI
 > assistant run real terminal commands on your computer** - macOS, Linux, or
-> Windows. Built for students learning MCP.
+> Windows. Built for students learning MCP. Connects to **opencode** as the MCP
+> client.
 
 ---
 
@@ -15,14 +16,14 @@ code, how the pieces of MCP fit together.
 When you finish this guide you will have:
 
 1. An MCP server running on your own machine.
-2. That server **connected to Claude Desktop**.
-3. The ability to ask Claude things like:
+2. That server **connected to opencode**.
+3. The ability to ask opencode things like:
    - *"Run `python3 --version` and tell me what's installed."*
    - *"What files are in my Downloads folder?"*
    - *"Which OS am I on and is `git` installed?"*
    - *"Run my tests and show me the failures."*
 
-…and Claude will **actually run those commands on your terminal** and answer
+…and opencode will **actually run those commands on your terminal** and answer
 from the real output.
 
 ---
@@ -30,26 +31,29 @@ from the real output.
 ## 🧠 MCP in one minute (the mental model)
 
 **Model Context Protocol (MCP)** is an open standard that lets AI applications
-("MCP **clients**", e.g. Claude Desktop) talk to programs that give the AI
+("MCP **clients**", e.g. opencode) talk to programs that give the AI
 superpowers ("MCP **servers**").
 
 Think of it as **USB-C for AI** 🔌:
 
 | Concept | Analogy | In this project |
 |---|---|---|
-| **MCP Client** | The laptop that wants to use devices | Claude Desktop |
+| **MCP Client** | The laptop that wants to use devices | opencode |
 | **MCP Server** | The device you plug in | `terminal_server.py` |
 | **Tool** | A button on the device | `run_command`, `list_directory`, `get_system_info` |
 | **Transport** | The cable | **stdio** (a pipe between two programs) |
 
 ### How the conversation works
 
-1. Claude Desktop starts your server as a child process.
+1. opencode starts your server as a child process when it launches (it reads
+   the server list from `opencode.json`).
 2. Both sides speak **JSON-RPC** messages over **stdin/stdout**.
-3. Claude Desktop asks `tools/list` → your server replies with the 3 tools and
-   their descriptions.
-4. When Claude wants to act, it sends `tools/call` with a tool name + arguments.
-5. Your server runs the code, returns the result, Claude reads it and continues.
+3. opencode asks `tools/list` → your server replies with the 3 tools and their
+   descriptions.
+4. When the agent wants to act, it sends `tools/call` with a tool name +
+   arguments.
+5. Your server runs the code, returns the result, the agent reads it and
+   continues.
 
 > 📌 **stdio transport** means: your server prints JSON to **stdout** and reads
 > JSON from **stdin**. That is why you must **never** `print()` normal text in
@@ -60,17 +64,25 @@ Think of it as **USB-C for AI** 🔌:
 
 ## 📂 Project structure
 
+This repository is your whole MCP course:
+
 ```
 mcp-server/
-├── terminal_server.py    # 👈 THE server - read this top to bottom
-├── requirements.txt      # 👈 lists the one Python dependency (the MCP SDK)
-├── .gitignore            # keeps .venv/ and __pycache__ out of git
-└── README.md             # 👈 you are here
+├── terminal_server.py       # 👈 THIS LESSON - the server - read it top to bottom
+├── requirements.txt         # 👈 lists the one Python dependency (the MCP SDK)
+├── opencode.json            # 👈 registers the servers with opencode
+├── README.md                # 👈 you are here
+│
+├── PRODUCTION_PLAN.md       # next course unit: a production-grade file server
+├── production-filesystem/   #   ...and its Phase 1 implementation
+│
+├── .venv/                   # virtual env (created in Step 2, not in git)
+└── .gitignore               # keeps .venv/ and __pycache__ out of git
 ```
 
-**Everything interesting lives in `terminal_server.py`.** Open it now and read
-the comments. Every section of the file is labelled so you can map it back to
-the MCP concepts above.
+**Everything interesting for this lesson lives in `terminal_server.py`.** Open
+it now and read the comments. Every section of the file is labelled so you can
+map it back to the MCP concepts above.
 
 ### A guided tour of `terminal_server.py`
 
@@ -79,7 +91,7 @@ the MCP concepts above.
 | Top docstring | What MCP is, what transport we use, cross-platform notes |
 | Imports | `subprocess` (runs commands), `platform`, `os`, the `MCPServer` class from the official SDK |
 | Logging setup | Why logs go to **stderr** and never **stdout** |
-| `mcp = MCPServer(...)` | Creating the server + giving Claude usage `instructions` |
+| `mcp = MCPServer(...)` | Creating the server + giving the agent usage `instructions` |
 | `run_command()` | **Tool 1** - the star. Runs any shell command with a timeout. |
 | `list_directory()` | **Tool 2** - cross-platform file listing returning clean data |
 | `get_system_info()` | **Tool 3** - reports OS, CPU, Python, which executables exist |
@@ -87,9 +99,9 @@ the MCP concepts above.
 
 > 💡 **The tools are defined as normal Python functions** with:
 > - a **type-hinted signature** (MCP uses it to auto-generate the JSON schema
->   the client sends to Claude),
-> - a **docstring** (becomes the tool description Claude reads to know when to
->   use the tool),
+>   the client sends to the agent),
+> - a **docstring** (becomes the tool description the agent reads to know when
+>   to use the tool),
 > - and an `@mcp.tool()` decorator that registers them.
 
 ---
@@ -102,7 +114,8 @@ the MCP concepts above.
   python3 --version
   ```
   > On Windows the command may be `python --version` or `py --version`.
-- **Claude Desktop** (installed + logged in) - see https://claude.ai/download.
+- **opencode** (installed) - see https://opencode.ai/docs/. This is the MCP
+  client we connect to.
 - For the optional Inspector testing step: **Node.js** (`node --version`) to get
   `npx`. (You can skip the Inspector and still complete the course.)
 
@@ -161,38 +174,51 @@ launchers, that's fine):
 
 ```
 [INFO] Starting MCP server: Terminal Server (local)
-[INFO] Listening on stdio. Connect me to an MCP client such as Claude Desktop.
+[INFO] Listening on stdio. Connect me to an MCP client such as opencode.
 ```
 
 Press `Ctrl+C` to stop it.
 
 > 💡 The server is now a working MCP server over stdio! Any MCP client can talk
-> to it. Claude Desktop is just the most famous one - and our next step.
+> to it. opencode is the client we use in this course - and our next step.
 
 ---
 
-## 🔌 Connecting to Claude Desktop
+## 🔌 Connecting to opencode
 
-### Step 5 - Find Claude Desktop's config file
+### Step 5 - Know where opencode reads its config
 
-Claude Desktop reads a JSON file that lists all your MCP servers:
+opencode is configured through an `opencode.json` (or `opencode.jsonc`) file.
+opencode looks for it in the **project directory** (the folder you run opencode
+from) and merges it with your global config at `~/.config/opencode/opencode.json`.
 
-| OS | Config file location |
-|---|---|
-| **macOS** | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| **Windows** | `%APPDATA%\Claude\claude_desktop_config.json` (usually `C:\Users\YOURNAME\AppData\Roaming\Claude\...`) |
-| **Linux** | `~/.config/Claude/claude_desktop_config.json` |
+**A working `opencode.json` is already included in this repo** (we created it
+so the course just works). Open it now and read the comments. The shape is:
 
-The file may not exist yet - that's normal, create it (including the `Claude`
-folder if needed).
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "terminal-server": {
+      "type": "local",
+      "command": ["/Users/YOU/mcp-server/.venv/bin/python", "/Users/YOU/mcp-server/terminal_server.py"]
+    }
+  }
+}
+```
 
-### Step 6 - Add your server to the config
+Key points for your own configs later:
+- The `$schema` line gives your editor auto-completion and validation.
+- `mcp` is an object keyed by server name (you get to pick the name).
+- Every server needs `"type": "local"` (it launches a command) and
+  `"command": [...]` - an **array** of strings, never a single string.
 
-Now we tell Claude Desktop to launch our server. **You need the absolute path to
-your Python** (inside the venv) and **the absolute path to
-`terminal_server.py`**.
+### Step 6 - Point the config at YOUR paths
 
-Get both paths on **macOS/Linux**:
+The repo's `opencode.json` contains absolute paths that only work on the
+teacher's machine. Replace them with **your** absolute paths from Step 1/2.
+
+Get the path to your venv Python on **macOS/Linux**:
 
 ```bash
 echo $VIRTUAL_ENV/bin/python        # prints e.g. /Users/YOU/mcp-server/.venv/bin/python
@@ -206,62 +232,58 @@ echo $env:VIRTUAL_ENV\Scripts\python.exe
 pwd
 ```
 
-Then paste the matching block below into the JSON config file.
-
 <details>
-<summary><b>🍎 macOS / 🐧 Linux config</b></summary>
+<summary><b>🍎 macOS / 🐧 Linux opencode.json</b></summary>
 
 ```json
 {
-  "mcpServers": {
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
     "terminal-server": {
-      "command": "/Users/YOU/mcp-server/.venv/bin/python",
-      "args": ["/Users/YOU/mcp-server/terminal_server.py"]
+      "type": "local",
+      "command": ["/Users/YOU/mcp-server/.venv/bin/python", "/Users/YOU/mcp-server/terminal_server.py"]
     }
   }
 }
 ```
-
-Replace `/Users/YOU/mcp-server/` with **your** paths from Step 6.
 </details>
 
 <details>
-<summary><b>🪟 Windows config</b></summary>
+<summary><b>🪟 Windows opencode.json</b></summary>
 
 > ⚠️ In JSON, every backslash `\` must be doubled `\\`.
 
 ```json
 {
-  "mcpServers": {
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
     "terminal-server": {
-      "command": "C:\\Users\\YOU\\mcp-server\\.venv\\Scripts\\python.exe",
-      "args": ["C:\\Users\\YOU\\mcp-server\\terminal_server.py"]
+      "type": "local",
+      "command": ["C:\\Users\\YOU\\mcp-server\\.venv\\Scripts\\python.exe", "C:\\Users\\YOU\\mcp-server\\terminal_server.py"]
     }
   }
 }
 ```
-
-Replace `C:\\Users\\YOU\\mcp-server\\` with **your** paths from Step 6.
 </details>
 
-### Step 7 - Restart Claude Desktop
+### Step 7 - Restart opencode
 
-1. **Fully quit** Claude Desktop (Cmd+Q on Mac / close from the system tray on
-   Windows).
-2. Reopen it. Claude Desktop starts every MCP server listed in the config when
-   it launches.
-3. Look for the 🔌 **plug icon** (a tools/power icon) in the bottom-left of the
-   input box. Click it - you should see **`terminal-server`** with 3 tools:
-   `run_command`, `list_directory`, `get_system_info`.
+opencode reads its config **once, at startup** - it is not hot-reloaded.
 
-> 💡 If you don't see the plug icon, click the little **grid/wrench icon**
-> instead - the MCP servers live under the tools menu in some versions.
+1. **Quit opencode** completely.
+2. Start it again from this project folder (`mcp-server`).
+3. opencode now launches your server as a child process and connects over
+   stdio. The tool is ready to use - just ask!
+
+> 💡 Not seeing it? Run `/mcp` (or open the MCP tools list in your opencode UI)
+> to confirm `terminal-server` is connected with its 3 tools: `run_command`,
+> `list_directory`, `get_system_info`.
 
 ---
 
 ## 🎯 Try it!
 
-Ask Claude anything that needs a terminal. Some great first prompts:
+Ask opencode anything that needs a terminal. Some great first prompts:
 
 | Prompt | Which tool runs |
 |---|---|
@@ -271,7 +293,7 @@ Ask Claude anything that needs a terminal. Some great first prompts:
 | "Run `ls -la` in this project folder and summarize what the files do." | `run_command` |
 | "Check my disk space with `df -h`." | `run_command` |
 
-Claude will ask for **permission before it runs a command** (good security
+opencode will ask for **permission before it runs a command** (good security
 habit). Watch it *actually execute on your machine* and answer from the real
 output. 🎉
 
@@ -301,12 +323,12 @@ Then in the opened page:
 
 | Symptom | Likely fix |
 |---|---|
-| No plug icon / no tools in Claude Desktop | Quit Claude completely (Cmd+Q / tray) and reopen. MCP servers load at startup. |
-| Config error shown in Claude Desktop | Check your JSON is valid. On Windows remember **double backslashes** `\\`. |
+| Tools not available in opencode | Quit opencode completely and reopen it from the project folder - MCP servers load at startup, and the config is not hot-reloaded. |
+| Config error when opencode starts | Check your `opencode.json` is valid JSON. On Windows remember **double backslashes** `\\`. Use `OPENCODE_DISABLE_PROJECT_CONFIG=1` to start while you fix it. |
 | Tool call fails with "command not found: X" | Run `get_system_info` first - the tool reports which executables are on `PATH`. |
-| Permission prompt never appears / command runs unexpectedly | Claude Desktop always asks; if not, review your Claude privacy settings. |
-| "Python not found" when Claude starts the server | Use the **absolute path** to your venv python (`which python` / `echo $VIRTUAL_ENV/bin/python`). |
-| Still broken? | Run the exact `command` + `args` from your config **manually in a terminal** - if it errors there, Claude Desktop will too. |
+| Permission prompt never appears / command runs unexpectedly | opencode's permission rules decide this (see your `opencode.json` "permission" block). Defaults ask before running. |
+| "Python not found" when opencode starts the server | Use the **absolute path** to your venv python (`which python` / `echo $VIRTUAL_ENV/bin/python`). |
+| Still broken? | Run the exact `command` array from your config **manually in a terminal** - if it errors there, opencode will too. |
 
 ---
 
@@ -314,12 +336,12 @@ Then in the opened page:
 
 This server is **intentionally unrestricted** so you can learn. That means:
 
-- Claude can run **any command** with **your** user permissions - including
+- The agent can run **any command** with **your** user permissions - including
   `rm -rf`, reading your files, or sending data over the network.
 - Only use this on **your own machine**, and only with MCP clients you trust.
 - Never share a machine running this server with untrusted people, and never
   run it on a shared/cloud machine for a demo.
-- The `instructions` we pass to Claude ("prefer read-only, ask before
+- The `instructions` we pass to the agent ("prefer read-only, ask before
   destructive commands") is a **hint, not a security boundary**.
 
 In a real product you would add a **command allowlist**. Great homework
@@ -350,6 +372,6 @@ exercise (below)! 🤓
 - Official MCP docs: https://modelcontextprotocol.io
 - MCP Python SDK on PyPI: https://pypi.org/project/mcp/
 - MCP Python SDK source & examples: https://github.com/modelcontextprotocol/python-sdk
+- opencode MCP config docs: https://opencode.ai/docs/mcp-servers/
 
 Happy building! 🚀
-# mcp-server

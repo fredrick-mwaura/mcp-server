@@ -7,7 +7,7 @@
  WHAT THIS FILE IS
  ------------------------------------------------------------------------------
  This is a complete, minimal MCP server. It exposes "tools" that an AI
- assistant (like Claude Desktop, Claude Code, or any MCP client) can call.
+ assistant (like opencode or any MCP client) can call.
 
  The tools in this server let the AI assistant safely (well, as safely as we
  make it!) execute terminal commands on YOUR computer, and do a few small
@@ -32,7 +32,7 @@
                and standard output (stdout).  <<< THIS IS WHAT WE USE.
    2. Streamable HTTP - the server runs as its own HTTP web service.
 
- We use stdio because it is the simplest to set up with Claude Desktop.
+ We use stdio because it is the simplest to set up with opencode.
  Because we write to stdout for protocol messages, we must NOT use print()
  anywhere in this file for normal output - it would corrupt the protocol!
  We always use logging (which writes to stderr) for our own debugging notes.
@@ -84,8 +84,8 @@ logging.basicConfig(
 # -----------------------------------------------------------------------------
 # THE APP NAME
 # -----------------------------------------------------------------------------
-# Every MCP server has a name. The client uses it in its UI (e.g. Claude
-# Desktop lists "Terminal Server (local)" next to the tools it provides).
+# Every MCP server has a name. The client uses it in its UI (e.g. opencode
+# lists "Terminal Server (local)" next to the tools it provides).
 APP_NAME = "Terminal Server (local)"
 
 # -----------------------------------------------------------------------------
@@ -111,7 +111,7 @@ mcp = MCPServer(
 # WARNING: Tools on this server execute with the SAME permissions as the user
 # who launched the server. That makes this server VERY powerful and therefore
 # potentially dangerous. Use it only on your own machine, and only with MCP
-# clients you trust (e.g. your own Claude Desktop).
+# clients you trust (e.g. your own opencode).
 #
 # A real production terminal server would add an ALLOWLIST of permitted
 # commands. For this course we keep it open, and instead teach you the risk.
@@ -337,10 +337,10 @@ def get_system_info() -> dict[str, Any]:
 # ==============================================================================
 if __name__ == "__main__":
     # A friendly note printed to STDERR so you (the student) see the server
-    # start. Claude Desktop, on the other hand, starts this file invisibly.
+    # start. opencode, on the other hand, starts this file invisibly.
     logging.info(f"Starting MCP server: {APP_NAME}")
     logging.info(
-        "Listening on stdio. Connect me to an MCP client such as Claude Desktop."
+        "Listening on stdio. Connect me to an MCP client such as opencode."
     )
 
     # mcp.run(transport="stdio") starts the server using the STDIO transport.

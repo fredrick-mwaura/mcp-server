@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "terminal-server": {
+      "type": "local",
+      "command": [
+        "/Users/frd/Projects/mcp-server/.venv/bin/python",
+        "/Users/frd/Projects/mcp-server/terminal_server.py"
+      ]
+    },
+    "filesystem": {
+      "type": "local",
+      "command": [
+        "/Users/frd/Projects/mcp-server/.venv/bin/mcp-filesystem-server"
+      ],
+      "environment": {
+        "MCP_FS_ROOTS": "/Users/frd/Projects/mcp-server",
+        "MCP_FS_MODE": "read-only",
+        "MCP_FS_TRANSPORT": "stdio"
+      }
+    }
+  }
+}

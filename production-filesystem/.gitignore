@@ -1,0 +1,16 @@
+# Python build artifacts from `pip install .`
+*.egg-info/
+build/
+dist/
+
+# Test caches
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Editor cruft
+.DS_Store
+.idea/
+.vscode/
