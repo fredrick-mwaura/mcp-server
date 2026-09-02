@@ -187,34 +187,35 @@ To make this server the **cheapest to operate** across thousands of benchmark ru
 - [x] Base `list_directory` tool.
 - [x] JSON structured logging & 16 unit/integration tests passing.
 
-### Phase 2: Token-Preserving Code Inspection & Search (CURRENT FOCUS 🚀)
-- [ ] `read_file`: Line slicing (`offset`, `limit`), line-number prefixes (`L42:`), binary detection, and byte caps.
-- [ ] `symbol_outline`: AST-based extraction of functions, classes, arguments, and docstrings for Python files.
-- [ ] `find_files`: Name/glob filter within allowed roots.
-- [ ] `grep_search`: High-speed regex/string search with bounded context lines and match caps.
-- [ ] Unit & integration tests for all Phase 2 tools.
+### Phase 2: Token-Preserving Code Inspection & Search (COMPLETED ✅)
+- [x] `read_file`: Line slicing (`offset`, `limit`), line-number prefixes (`L42:`), binary detection, and byte caps.
+- [x] `symbol_outline`: AST-based extraction of functions, classes, arguments, and docstrings for Python files.
+- [x] `find_files`: Name/glob filter within allowed roots.
+- [x] `grep_search`: High-speed regex/string search with bounded context lines and match caps.
+- [x] Unit & integration tests for all Phase 2 tools.
 
-### Phase 3: Surgical Editing & Pre-Commit Syntax Gate
-- [ ] `edit_block`: Precise string replacement with uniqueness validation and dry-run mode.
-- [ ] `syntax_guard`: AST validation on Python edits prior to disk commit.
-- [ ] `write_file`: Atomic temporary-file-and-swap mechanism.
-- [ ] `apply_patch`: Unified diff patch engine.
-- [ ] `delete_entry`: Safe deletion via `.trash/` buffer.
+### Phase 3: Surgical Editing & Pre-Commit Syntax Gate (COMPLETED ✅)
+- [x] `edit_block`: Precise string replacement with uniqueness validation and dry-run mode.
+- [x] `syntax_guard`: AST validation on Python edits prior to disk commit.
+- [x] `write_file`: Atomic temporary-file-and-swap mechanism.
+- [x] `apply_patch`: Unified diff patch engine.
+- [x] `delete_entry`: Safe deletion via `.trash/` buffer.
 
-### Phase 4: SWE-Bench & Git Lifecycle
-- [ ] `git_status`: Structured summary of modified, added, deleted, and untracked files.
-- [ ] `git_diff`: Clean unified diff generation against `HEAD` or index.
-- [ ] `export_swebench_patch`: Generate standardized `.patch` string for benchmark submission.
-- [ ] `revert_file`: Roll back changes to a specific file.
+### Phase 4: SWE-Bench & Git Lifecycle (COMPLETED ✅)
+- [x] `git_status`: Structured summary of modified, added, deleted, and untracked files.
+- [x] `git_diff`: Clean unified diff generation against `HEAD` or index.
+- [x] `export_swebench_patch`: Generate standardized `.patch` string for benchmark submission.
+- [x] `revert_file`: Roll back changes to a specific file.
 
-### Phase 5: Verification & Smart Test Runner
-- [ ] `run_test`: Subprocess test runner with timeout and exit code handling.
-- [ ] Failure distillation: Parser extracting failed test names, assertion failures, and tracebacks while discarding passing chatter.
+### Phase 5: Verification & Smart Test Runner (COMPLETED ✅)
+- [x] `run_test`: Subprocess test runner with timeout and exit code handling.
+- [x] Failure distillation: Parser extracting failed test names, assertion failures, and tracebacks while discarding passing chatter.
 
-### Phase 6: Remote Transport, Packaging & CI/CD
-- [ ] `streamable-http` transport with bearer token authentication and scope mapping.
-- [ ] Multi-stage non-root Dockerfile.
-- [ ] GitHub Actions CI matrix covering macOS, Linux, and Windows.
+### Phase 6: Remote Transport, Packaging & CI/CD (COMPLETED ✅)
+- [x] `streamable-http` transport: Frictionless zero-auth HTTP runner with host/port configuration.
+- [x] Multi-stage non-root Dockerfile for evaluation sandboxes.
+- [x] GitHub Actions CI matrix covering macOS, Linux, and Windows across Python 3.10–3.12.
+
 
 ---
 
