@@ -10,6 +10,7 @@ inspection, surgical editing, pre-commit AST syntax validation, and native Git i
 > - **[`Token Economics & Cost Optimization`](../docs/token_economics.md)**: Line slicing, AST outlines, and 90-98% token reduction.
 > - **[`Security & VFS Invariants`](../docs/security_and_vfs.md)**: Single chokepoint gate, atomic swap writes, and scoped trash design.
 > - **[`Git & SWE-Bench Lifecycle`](../docs/git_and_swebench.md)**: Patch export pipeline, status parsing, and autonomous rollback.
+> - **[`Test Execution & Smart Failure Distillation`](../docs/test_runner.md)**: Bounded test runner and 90% token reduction on test results.
 
 
 ## The security design (read this once)

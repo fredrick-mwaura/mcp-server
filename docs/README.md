@@ -14,6 +14,7 @@ This server is engineered specifically for daily high-productivity software engi
 | **[2. Token Economics & Cost Optimization](token_economics.md)** | In-depth breakdown of prompt and completion token savings (~90–98%), AST outline navigation, surgical editing, and failure prevention. |
 | **[3. Security Invariants & VFS Algorithms](security_and_vfs.md)** | Canonical path resolution algorithm, adversarial threat defense, atomic write swap (`os.replace`), and why scoped `<root>/.trash/` is used instead of `send2trash`. |
 | **[4. Git & SWE-Bench Lifecycle](git_and_swebench.md)** | SWE-bench submission patch export pipeline (`git diff HEAD`), porcelain status parsing, diff line-capping, and rollback guarantees. |
+| **[5. Test Execution & Failure Distillation](test_runner.md)** | Bounded test execution (`run_test`), failure trace extraction, and ~90% token reduction on test results. |
 
 ---
 

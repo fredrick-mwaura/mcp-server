@@ -28,7 +28,7 @@ from mcp_fs.config import Settings
 from mcp_fs.errors import FileSystemError, ReadOnlyModeError
 from mcp_fs.security import canonical_root, resolve_allowed_path, validate_python_syntax
 from mcp_fs.telemetry import configure_logging
-from mcp_fs.tools import navigation, search, outline, editing, git_ops
+from mcp_fs.tools import navigation, search, outline, editing, git_ops, execution
 from mcp_fs import __version__
 
 # --- SDK v2 --------------------------------------------------------------
@@ -100,7 +100,8 @@ def build_server(settings: Settings) -> MCPServer:
         "grep_search (ripgrep-accelerated), symbol_outline (AST map), "
         "git_status, git_diff, export_swebench_patch. "
         "Write tools: edit_block (surgical), write_file (atomic), "
-        "apply_patch (unified diff), delete_entry (safe trash), revert_file (rollback to HEAD). "
+        "apply_patch (unified diff), delete_entry (safe trash), revert_file (rollback to HEAD), "
+        "run_test (bounded test runner with failure distillation). "
         f"{mode_desc} Only the following root(s) may be accessed; "
         "any other path is rejected:\n"
         + "\n".join(f"- {r}" for r in root_strings)
@@ -784,6 +785,62 @@ def build_server(settings: Settings) -> MCPServer:
             return exc.to_result()
         except Exception as exc:  # noqa: BLE001
             logger.exception("unexpected_tool_error", extra={"tool": "revert_file"})
+            return {"error_code": "internal_error", "error": f"Unexpected error: {exc}"}
+
+    # =================================================================
+    # TOOL: run_test (Phase 5 — Verification & Smart Test Runner)
+    # =================================================================
+    @mcp.tool()
+    def run_test(
+        command: str,
+        path: str = ".",
+        timeout: float = 90.0,
+        distill: bool = True,
+    ) -> dict[str, object]:
+        """Execute a test command in the repository with smart failure distillation.
+
+        Runs test suites (e.g. 'pytest tests/test_app.py -k test_foo', 'python -m unittest')
+        with bounded timeouts. When distill=True, strips passing test chatter
+        and warnings, isolating only failing assertions, tracebacks, and counts
+        (~90% token reduction). Requires read-write mode.
+
+        Args:
+            command: The test command string to execute.
+            path:    The directory to execute the test within (default: ".").
+            timeout: Maximum execution seconds before aborting (default: 90, max: 300).
+            distill: If True, extract only failure traces and summary metrics (default: True).
+
+        Returns:
+            A dictionary containing status, counts, execution duration, and
+            distilled failure outputs.
+        """
+        started = time.perf_counter()
+        logger.info("tool_call", extra={"tool": "run_test", "command": command, "path": path})
+        try:
+            _require_write_mode("run_test")
+            canonical = resolve_allowed_path(path, root_strings, must_exist=True)
+            result = execution.run_test(
+                canonical,
+                command,
+                timeout=timeout,
+                distill=distill,
+            )
+            logger.info(
+                "tool_result",
+                extra={"tool": "run_test", "ok": True,
+                       "status": result.get("status"),
+                       "duration_ms": _ms_since(started)},
+            )
+            return result
+        except FileSystemError as exc:
+            logger.info(
+                "tool_result",
+                extra={"tool": "run_test", "ok": False,
+                       "error_code": exc.code, "duration_ms": _ms_since(started)},
+            )
+            return exc.to_result()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("unexpected_tool_error", extra={"tool": "run_test"})
             return {"error_code": "internal_error", "error": f"Unexpected error: {exc}"}
 
     return mcp

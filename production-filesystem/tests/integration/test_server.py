@@ -62,6 +62,7 @@ def test_server_exposes_all_tools(tmp_path: Path) -> None:
         "list_directory",
         "read_file",
         "revert_file",
+        "run_test",
         "symbol_outline",
         "write_file",
     ]
