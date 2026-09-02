@@ -52,6 +52,21 @@ class Settings(BaseModel):
     log_level: str = "INFO"
     log_format: Literal["json", "text"] = "json"
 
+    # Phase 2: Token-budget limits. These protect the model's context window
+    # and your API bill. read_file defaults to returning at most this many
+    # lines per call; the caller can override with offset/limit but never
+    # exceed max_read_bytes.
+    max_read_lines: int = Field(
+        default=200,
+        description="Default max lines returned by read_file. Caller can "
+        "request fewer via limit, but never more than this.",
+    )
+    max_read_bytes: int = Field(
+        default=1_000_000,   # 1 MB
+        description="Hard cap on file size for full reads. Files larger than "
+        "this require offset/limit. Prevents 40 GB log dumps.",
+    )
+
     @classmethod
     def from_env(cls) -> "Settings":
         """Build a Settings object from the process environment.
@@ -71,6 +86,8 @@ class Settings(BaseModel):
             transport=os.environ.get("MCP_FS_TRANSPORT", "stdio"),
             log_level=os.environ.get("MCP_FS_LOG_LEVEL", "INFO"),
             log_format=os.environ.get("MCP_FS_LOG_FORMAT", "json"),
+            max_read_lines=int(os.environ.get("MCP_FS_MAX_READ_LINES", "200")),
+            max_read_bytes=int(os.environ.get("MCP_FS_MAX_READ_BYTES", "1000000")),
         )
 
 
