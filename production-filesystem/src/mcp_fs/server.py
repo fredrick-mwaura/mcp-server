@@ -19,6 +19,7 @@ LESSON - closures as dependency injection:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 import sys
 import time
 
@@ -76,9 +77,8 @@ def build_server(settings: Settings) -> MCPServer:
         if server_mode != "read-write":
             raise ReadOnlyModeError(tool_name)
 
-    def _find_root_for(canonical: 'Path') -> 'Path':
+    def _find_root_for(canonical: Path) -> Path:
         """Find which allowed root a canonical path belongs to."""
-        from pathlib import Path as P
         for r in roots:
             try:
                 canonical.relative_to(r)
