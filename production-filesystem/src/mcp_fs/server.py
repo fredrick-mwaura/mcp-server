@@ -880,11 +880,20 @@ def main() -> int:
             "roots": settings.roots,
             "mode": settings.mode,
             "transport": settings.transport,
+            "host": settings.host,
+            "port": settings.port,
         },
     )
-    logger.info("Listening on stdio. Connect me to an MCP client such as opencode.")
 
-    # Block forever, serving JSON-RPC over stdin/stdout until the client exits.
-    # Phase 4 swaps this call for the streamable-http runner behind auth.
-    server.run(transport=settings.transport)
+    # Block forever, serving JSON-RPC over the configured transport.
+    if settings.transport == "streamable-http":
+        print(f"Starting MCP HTTP server at http://{settings.host}:{settings.port}/mcp", file=sys.stderr)
+        server.run(
+            transport="streamable-http",
+            host=settings.host,
+            port=settings.port,
+        )
+    else:
+        logger.info("Listening on stdio. Connect me to an MCP client such as opencode.")
+        server.run(transport="stdio")
     return 0

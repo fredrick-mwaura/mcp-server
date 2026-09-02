@@ -67,6 +67,17 @@ class Settings(BaseModel):
         "this require offset/limit. Prevents 40 GB log dumps.",
     )
 
+    # Phase 6: Remote HTTP transport knobs. Frictionless & zero-auth:
+    # binds to host/port (defaults to localhost:8000).
+    host: str = Field(
+        default="127.0.0.1",
+        description="Host interface to bind HTTP transport to (default: 127.0.0.1).",
+    )
+    port: int = Field(
+        default=8000,
+        description="Port for HTTP transport (default: 8000).",
+    )
+
     @classmethod
     def from_env(cls) -> "Settings":
         """Build a Settings object from the process environment.
@@ -88,6 +99,8 @@ class Settings(BaseModel):
             log_format=os.environ.get("MCP_FS_LOG_FORMAT", "json"),
             max_read_lines=int(os.environ.get("MCP_FS_MAX_READ_LINES", "200")),
             max_read_bytes=int(os.environ.get("MCP_FS_MAX_READ_BYTES", "1000000")),
+            host=os.environ.get("MCP_FS_HOST", "127.0.0.1"),
+            port=int(os.environ.get("MCP_FS_PORT", "8000")),
         )
 
 
