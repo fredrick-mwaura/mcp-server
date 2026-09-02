@@ -170,3 +170,37 @@ class SyntaxValidationError(FileSystemError):
             f"Syntax error{loc} in '{path}': {detail}. "
             f"The file was NOT modified. Fix the syntax and retry."
         )
+
+
+class NotAGitRepositoryError(FileSystemError):
+    """The requested path is not within a git repository.
+
+    Phase 4: tools like git_status and export_swebench_patch need to fail
+    cleanly with a structured error when called on a directory that is not
+    managed by git.
+    """
+
+    code = "not_a_git_repo"
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        super().__init__(f"Path is not in a git repository: {path}")
+
+
+class GitCommandError(FileSystemError):
+    """A git command failed to execute or returned a non-zero exit code.
+
+    Phase 4: wraps git CLI failures into structured tool errors with stderr
+    diagnostics for the agent.
+    """
+
+    code = "git_command_error"
+
+    def __init__(self, command: str, returncode: int, stderr: str) -> None:
+        self.command = command
+        self.returncode = returncode
+        self.stderr = stderr.strip()
+        super().__init__(
+            f"git command '{command}' failed (exit code {returncode}): {self.stderr}"
+        )
+

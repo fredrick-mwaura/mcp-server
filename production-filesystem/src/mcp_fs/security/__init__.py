@@ -5,8 +5,13 @@ approved here, it never reaches vfs.py, and therefore never reaches the real
 filesystem. This single-gate design is what makes the attack surface auditable:
 
     tool handler  ->  security.canonical_path.resolve_allowed_path()  ->  vfs
+
+Phase 3 adds a second gate for Python file writes:
+
+    edit/write    ->  security.syntax_guard.validate_python_syntax()  ->  vfs
 """
 
 from mcp_fs.security.canonical_path import canonical_root, resolve_allowed_path
+from mcp_fs.security.syntax_guard import validate_python_syntax
 
-__all__ = ["canonical_root", "resolve_allowed_path"]
+__all__ = ["canonical_root", "resolve_allowed_path", "validate_python_syntax"]

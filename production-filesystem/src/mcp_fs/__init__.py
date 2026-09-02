@@ -19,4 +19,4 @@ The rule that keeps this safe: *no module except vfs.py imports os/fs calls,
 and no path reaches vfs.py without first passing through security.*
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

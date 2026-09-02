@@ -25,10 +25,10 @@ import time
 from pydantic import ValidationError
 
 from mcp_fs.config import Settings
-from mcp_fs.errors import FileSystemError
-from mcp_fs.security import canonical_root, resolve_allowed_path
+from mcp_fs.errors import FileSystemError, ReadOnlyModeError
+from mcp_fs.security import canonical_root, resolve_allowed_path, validate_python_syntax
 from mcp_fs.telemetry import configure_logging
-from mcp_fs.tools import navigation, search, outline
+from mcp_fs.tools import navigation, search, outline, editing
 from mcp_fs import __version__
 
 # --- SDK v2 --------------------------------------------------------------
@@ -69,14 +69,38 @@ def build_server(settings: Settings) -> MCPServer:
     # Capture config limits into the closure scope.
     max_read_lines = settings.max_read_lines
     max_read_bytes = settings.max_read_bytes
+    server_mode = settings.mode
+
+    def _require_write_mode(tool_name: str) -> None:
+        """Raise ReadOnlyModeError if the server is not in read-write mode."""
+        if server_mode != "read-write":
+            raise ReadOnlyModeError(tool_name)
+
+    def _find_root_for(canonical: 'Path') -> 'Path':
+        """Find which allowed root a canonical path belongs to."""
+        from pathlib import Path as P
+        for r in roots:
+            try:
+                canonical.relative_to(r)
+                return r
+            except ValueError:
+                continue
+        return roots[0]  # fallback (should not happen after security gate)
 
     # The instructions reach the model on connection. Telling the agent WHICH
     # directories are legal turns a wall of path errors into good first tries.
+    mode_desc = (
+        "Read and write tools are available."
+        if server_mode == "read-write"
+        else "It is READ-ONLY. Write tools will return an error."
+    )
     instructions = (
         "This server provides secure, token-efficient file system access. "
-        "Available tools: list_directory, read_file (line-sliced), find_files, "
+        "Read tools: list_directory, read_file (line-sliced), find_files, "
         "grep_search (ripgrep-accelerated), symbol_outline (AST map). "
-        "It is READ-ONLY. Only the following root(s) may be accessed; "
+        "Write tools: edit_block (surgical), write_file (atomic), "
+        "apply_patch (unified diff), delete_entry (safe trash). "
+        f"{mode_desc} Only the following root(s) may be accessed; "
         "any other path is rejected:\n"
         + "\n".join(f"- {r}" for r in root_strings)
         + "\nPrefer absolute paths inside an allowed root."
@@ -336,6 +360,240 @@ def build_server(settings: Settings) -> MCPServer:
             return exc.to_result()
         except Exception as exc:  # noqa: BLE001
             logger.exception("unexpected_tool_error", extra={"tool": "symbol_outline"})
+            return {"error_code": "internal_error", "error": f"Unexpected error: {exc}"}
+
+    # =================================================================
+    # TOOL: edit_block (Phase 3 — surgical string replacement)
+    # =================================================================
+    @mcp.tool()
+    def edit_block(
+        path: str,
+        target_content: str,
+        replacement_content: str,
+        dry_run: bool = False,
+    ) -> dict[str, object]:
+        """Replace a unique text chunk in a file with new content.
+
+        The most token-efficient way to edit code: send only the exact text
+        to find and its replacement. The target must appear exactly once in
+        the file. Use dry_run=True to preview without modifying.
+
+        Python files are validated with ast.parse() before saving — if the
+        edit would introduce a syntax error, the file is NOT modified and
+        the exact error is returned.
+
+        Args:
+            path:                The file to edit.
+            target_content:      The exact text to find (must appear once).
+            replacement_content: The replacement text.
+            dry_run:             If True, report what would happen without editing.
+
+        Returns:
+            On success: path, action, and edit details.
+            On dry_run: confirmation that the target was found.
+        """
+        started = time.perf_counter()
+        logger.info("tool_call", extra={"tool": "edit_block", "path": path, "dry_run": dry_run})
+        try:
+            _require_write_mode("edit_block")
+            canonical = resolve_allowed_path(path, root_strings, must_exist=True)
+            result = editing.edit_block(
+                canonical,
+                target_content,
+                replacement_content,
+                dry_run=dry_run,
+            )
+            if not dry_run and result.get("action") == "edit_ready":
+                new_content = result["new_content"]
+                # AST syntax gate: validate Python before touching disk.
+                validate_python_syntax(new_content, canonical)
+                # Commit via atomic write.
+                from mcp_fs import vfs
+                write_result = vfs.write_file_atomic(canonical, new_content)
+                result = {
+                    "path": str(canonical),
+                    "action": "edited",
+                    "size_bytes": write_result["size_bytes"],
+                }
+            logger.info(
+                "tool_result",
+                extra={"tool": "edit_block", "ok": True,
+                       "duration_ms": _ms_since(started)},
+            )
+            return result
+        except FileSystemError as exc:
+            logger.info(
+                "tool_result",
+                extra={"tool": "edit_block", "ok": False,
+                       "error_code": exc.code, "duration_ms": _ms_since(started)},
+            )
+            return exc.to_result()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("unexpected_tool_error", extra={"tool": "edit_block"})
+            return {"error_code": "internal_error", "error": f"Unexpected error: {exc}"}
+
+    # =================================================================
+    # TOOL: write_file (Phase 3 — atomic create/overwrite)
+    # =================================================================
+    @mcp.tool()
+    def write_file(
+        path: str,
+        content: str,
+    ) -> dict[str, object]:
+        """Create or overwrite a file atomically.
+
+        Uses a crash-safe write pattern: content goes to a temp file first,
+        is fsynced to disk, then atomically replaces the target. If the
+        process dies mid-write, the original file is untouched.
+
+        Python files are validated with ast.parse() before saving.
+
+        Args:
+            path:    The file to create or overwrite.
+            content: The full file content to write.
+
+        Returns:
+            A dictionary with path, size_bytes, and action (created/overwritten).
+        """
+        started = time.perf_counter()
+        logger.info("tool_call", extra={"tool": "write_file", "path": path})
+        try:
+            _require_write_mode("write_file")
+            canonical = resolve_allowed_path(path, root_strings, must_exist=False)
+            # AST syntax gate for Python files.
+            validate_python_syntax(content, canonical)
+            result = editing.write_file(canonical, content)
+            logger.info(
+                "tool_result",
+                extra={"tool": "write_file", "ok": True,
+                       "action": result["action"],
+                       "duration_ms": _ms_since(started)},
+            )
+            return result
+        except FileSystemError as exc:
+            logger.info(
+                "tool_result",
+                extra={"tool": "write_file", "ok": False,
+                       "error_code": exc.code, "duration_ms": _ms_since(started)},
+            )
+            return exc.to_result()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("unexpected_tool_error", extra={"tool": "write_file"})
+            return {"error_code": "internal_error", "error": f"Unexpected error: {exc}"}
+
+    # =================================================================
+    # TOOL: apply_patch (Phase 3 — unified diff application)
+    # =================================================================
+    @mcp.tool()
+    def apply_patch(
+        patch: str,
+        path: str = ".",
+    ) -> dict[str, object]:
+        """Apply a unified diff patch to files under an allowed directory.
+
+        Accepts standard unified diff format (as from `git diff`). Parses
+        the patch, validates syntax for Python files, and applies changes
+        atomically.
+
+        Args:
+            patch: The unified diff string.
+            path:  The root directory the patch paths are relative to.
+
+        Returns:
+            A dictionary with files_modified count, file list, and any errors.
+        """
+        started = time.perf_counter()
+        logger.info("tool_call", extra={"tool": "apply_patch", "path": path})
+        try:
+            _require_write_mode("apply_patch")
+            canonical = resolve_allowed_path(path, root_strings, must_exist=True)
+            parse_result = editing.apply_patch(canonical, patch)
+
+            # Apply each parsed file result with syntax validation.
+            applied_files: list[str] = []
+            errors: list[str] = list(parse_result.get("errors", []))
+
+            for file_result in parse_result.get("results", []):
+                rel_path = file_result["file"]
+                new_content = file_result["new_content"]
+                target_path = canonical / rel_path
+
+                try:
+                    validate_python_syntax(new_content, target_path)
+                    from mcp_fs import vfs
+                    if file_result.get("is_new"):
+                        target_path.parent.mkdir(parents=True, exist_ok=True)
+                    vfs.write_file_atomic(target_path, new_content)
+                    applied_files.append(rel_path)
+                except FileSystemError as file_exc:
+                    errors.append(f"{rel_path}: {file_exc.message}")
+
+            result = {
+                "root": str(canonical),
+                "action": "patch_applied",
+                "files_modified": len(applied_files),
+                "files": applied_files,
+                "errors": errors,
+            }
+            logger.info(
+                "tool_result",
+                extra={"tool": "apply_patch", "ok": True,
+                       "files": len(applied_files),
+                       "duration_ms": _ms_since(started)},
+            )
+            return result
+        except FileSystemError as exc:
+            logger.info(
+                "tool_result",
+                extra={"tool": "apply_patch", "ok": False,
+                       "error_code": exc.code, "duration_ms": _ms_since(started)},
+            )
+            return exc.to_result()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("unexpected_tool_error", extra={"tool": "apply_patch"})
+            return {"error_code": "internal_error", "error": f"Unexpected error: {exc}"}
+
+    # =================================================================
+    # TOOL: delete_entry (Phase 3 — safe deletion to .trash/)
+    # =================================================================
+    @mcp.tool()
+    def delete_entry(
+        path: str,
+    ) -> dict[str, object]:
+        """Delete a file or directory by moving it to .trash/ (recoverable).
+
+        Instead of permanent deletion, files are moved to a .trash/
+        directory inside the allowed root. This provides immediate recovery
+        if the wrong file is deleted.
+
+        Args:
+            path: The file or directory to delete.
+
+        Returns:
+            A dictionary with the original path and the trash destination.
+        """
+        started = time.perf_counter()
+        logger.info("tool_call", extra={"tool": "delete_entry", "path": path})
+        try:
+            _require_write_mode("delete_entry")
+            canonical = resolve_allowed_path(path, root_strings, must_exist=True)
+            root = _find_root_for(canonical)
+            result = editing.delete_entry(canonical, root)
+            logger.info(
+                "tool_result",
+                extra={"tool": "delete_entry", "ok": True,
+                       "duration_ms": _ms_since(started)},
+            )
+            return result
+        except FileSystemError as exc:
+            logger.info(
+                "tool_result",
+                extra={"tool": "delete_entry", "ok": False,
+                       "error_code": exc.code, "duration_ms": _ms_since(started)},
+            )
+            return exc.to_result()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("unexpected_tool_error", extra={"tool": "delete_entry"})
             return {"error_code": "internal_error", "error": f"Unexpected error: {exc}"}
 
     return mcp

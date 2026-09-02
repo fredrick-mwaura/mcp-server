@@ -255,3 +255,111 @@ def find_files(
                     return results
 
     return results
+
+
+# --------------------------------------------------------------------------
+# Phase 3: atomic file writing (crash-safe)
+# --------------------------------------------------------------------------
+
+def write_file_atomic(canonical_path: Path, content: str) -> dict[str, object]:
+    """Write content to a file using an atomic swap.
+
+    The write is crash-safe: content goes to a sibling temporary file first,
+    is fsynced to disk, then atomically replaces the target via os.replace().
+    If the process dies mid-write, the original file is untouched.
+
+    Args:
+        canonical_path: An approved, canonical path (from security). Parent
+                        directory must exist.
+        content:        The full file content to write.
+
+    Returns:
+        A result dict with path, size_bytes, and whether it was a new file.
+
+    Raises:
+        PathNotFoundError: the parent directory does not exist.
+    """
+    import tempfile
+    import uuid
+
+    parent = canonical_path.parent
+    if not parent.is_dir():
+        raise PathNotFoundError(str(parent))
+
+    is_new = not canonical_path.exists()
+
+    # Write to a sibling temp file in the same directory (same filesystem,
+    # so os.replace is guaranteed atomic on POSIX and Windows).
+    tmp_name = f".{canonical_path.name}.mcpfs-tmp-{uuid.uuid4().hex[:8]}"
+    tmp_path = parent / tmp_name
+
+    try:
+        with open(tmp_path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())  # ensure bytes hit disk before rename
+
+        # Atomic replace: if this succeeds, the file is fully written.
+        # If the process dies before this line, the original is intact.
+        os.replace(tmp_path, canonical_path)
+    except BaseException:
+        # Clean up the temp file on any failure.
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+    stat = os.stat(canonical_path)
+    return {
+        "path": str(canonical_path),
+        "size_bytes": stat.st_size,
+        "is_new": is_new,
+        "action": "created" if is_new else "overwritten",
+    }
+
+
+# --------------------------------------------------------------------------
+# Phase 3: safe deletion via .trash/ buffer
+# --------------------------------------------------------------------------
+
+def delete_to_trash(canonical_path: Path, root: Path) -> dict[str, object]:
+    """Move a file or directory to a .trash/ buffer inside the allowed root.
+
+    Instead of permanent deletion, files are moved to `<root>/.trash/<name>`.
+    This provides immediate recovery if an agent deletes the wrong file.
+    A UUID suffix prevents name collisions in the trash.
+
+    Args:
+        canonical_path: An approved, canonical, existing path.
+        root:           The allowed root this path belongs to.
+
+    Returns:
+        A result dict with the original path and trash destination.
+
+    Raises:
+        PathNotFoundError: the path does not exist.
+    """
+    import shutil
+    import uuid
+
+    if not os.path.lexists(canonical_path):
+        raise PathNotFoundError(str(canonical_path))
+
+    trash_dir = root / ".trash"
+    trash_dir.mkdir(exist_ok=True)
+
+    # Add UUID suffix to prevent collisions when the same name is deleted twice.
+    trash_name = f"{canonical_path.name}.{uuid.uuid4().hex[:8]}"
+    trash_dest = trash_dir / trash_name
+
+    if canonical_path.is_dir():
+        shutil.move(str(canonical_path), str(trash_dest))
+    else:
+        shutil.move(str(canonical_path), str(trash_dest))
+
+    return {
+        "path": str(canonical_path),
+        "trash_path": str(trash_dest),
+        "action": "moved_to_trash",
+    }
