@@ -85,6 +85,24 @@ def test_git_status_blocks_traversal(tmp_path: Path) -> None:
     assert res["error_code"] == "path_not_allowed"
 
 
+def test_git_repository_above_allowed_root_is_rejected(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    subdir = tmp_path / "allowed-subdir"
+    subdir.mkdir()
+    server = _ro_server(subdir)
+    for tool in ("git_status", "git_diff", "export_swebench_patch"):
+        res = _call(server, tool, {"path": str(subdir)})
+        assert res["error_code"] == "git_repo_outside_root"
+
+
+def test_git_diff_rejects_escaping_pathspec(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    res = _call(_ro_server(tmp_path), "git_diff", {
+        "path": str(tmp_path), "paths": ["../secret.txt"],
+    })
+    assert res["error_code"] == "invalid_argument"
+
+
 # =================================================================
 # git_diff integration tests
 # =================================================================

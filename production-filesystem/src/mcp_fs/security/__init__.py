@@ -11,7 +11,7 @@ Phase 3 adds a second gate for Python file writes:
     edit/write    ->  security.syntax_guard.validate_python_syntax()  ->  vfs
 """
 
-from mcp_fs.security.canonical_path import canonical_root, resolve_allowed_path
+from mcp_fs.security.canonical_path import canonical_root, resolve_allowed_path, resolve_patch_target
 from mcp_fs.security.syntax_guard import validate_python_syntax
 
-__all__ = ["canonical_root", "resolve_allowed_path", "validate_python_syntax"]
+__all__ = ["canonical_root", "resolve_allowed_path", "resolve_patch_target", "validate_python_syntax"]

@@ -20,55 +20,71 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from mcp_fs.errors import GitCommandError, NotAGitRepositoryError, PathNotFoundError
+from mcp_fs.errors import (
+    GitCommandError,
+    GitRepositoryOutsideRootError,
+    InvalidArgumentError,
+    NotAGitRepositoryError,
+    PathNotFoundError,
+)
+from mcp_fs.process import run_bounded
 
 
-def _get_repo_root(canonical_path: Path) -> Path:
+def _get_repo_root(canonical_path: Path, allowed_root: Path | None = None) -> Path:
     """Find the root directory of the git repository enclosing canonical_path."""
     start_dir = canonical_path if canonical_path.is_dir() else canonical_path.parent
     if not os.path.lexists(start_dir):
         raise PathNotFoundError(str(start_dir))
 
     try:
-        res = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=str(start_dir),
-            capture_output=True,
-            text=True,
-            timeout=10,
+        res = run_bounded(
+            ["git", "rev-parse", "--show-toplevel"], cwd=start_dir,
+            timeout=10, max_output_bytes=65_536, env=_git_env(),
         )
     except FileNotFoundError as exc:
         raise GitCommandError("git", -1, "git executable not found on system PATH") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise GitCommandError("git rev-parse", -1, "git command timed out") from exc
+
+    if res.timed_out:
+        raise GitCommandError("git rev-parse", -1, "git command timed out")
 
     if res.returncode != 0:
         raise NotAGitRepositoryError(str(canonical_path))
 
-    return Path(res.stdout.strip()).resolve()
+    repo_root = Path(res.stdout.strip()).resolve()
+    boundary = (allowed_root or repo_root).resolve()
+    try:
+        repo_root.relative_to(boundary)
+    except ValueError as exc:
+        raise GitRepositoryOutsideRootError(str(repo_root), str(boundary)) from exc
+    return repo_root
 
 
-def _run_git(cmd: list[str], cwd: Path, timeout: float = 15.0) -> str:
+def _git_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env.pop("MCP_FS_AUTH_TOKEN", None)
+    return env
+
+
+def _run_git(cmd: list[str], cwd: Path, timeout: float = 15.0, max_output_bytes: int = 1_000_000) -> str:
     """Execute a git command within `cwd` and return stdout.
 
     Raises NotAGitRepositoryError if cwd is not in a git repo,
     or GitCommandError if execution fails.
     """
     try:
-        res = subprocess.run(
-            ["git", *cmd],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+        res = run_bounded(
+            ["git", *cmd], cwd=cwd, timeout=timeout,
+            max_output_bytes=max_output_bytes, env=_git_env(),
         )
     except FileNotFoundError as exc:
         raise GitCommandError("git", -1, "git executable not found on system PATH") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise GitCommandError(f"git {' '.join(cmd)}", -1, f"command timed out after {timeout}s") from exc
+
+    if res.timed_out:
+        raise GitCommandError(f"git {' '.join(cmd)}", -1, f"command timed out after {timeout}s")
 
     if res.returncode != 0:
         stderr_lower = res.stderr.lower()
@@ -76,10 +92,12 @@ def _run_git(cmd: list[str], cwd: Path, timeout: float = 15.0) -> str:
             raise NotAGitRepositoryError(str(cwd))
         raise GitCommandError(f"git {' '.join(cmd)}", res.returncode, res.stderr)
 
+    if res.stdout_truncated:
+        return res.stdout + "\n[output truncated at configured byte limit]\n"
     return res.stdout
 
 
-def git_status(canonical_path: Path) -> dict[str, object]:
+def git_status(canonical_path: Path, allowed_root: Path | None = None, *, max_output_bytes: int = 1_000_000) -> dict[str, object]:
     """Retrieve structured Git status for the repository enclosing canonical_path.
 
     Returns a clean, machine-readable summary of the current branch, staged
@@ -91,8 +109,8 @@ def git_status(canonical_path: Path) -> dict[str, object]:
     Returns:
         A dictionary containing branch info, change lists, counts, and cleanliness.
     """
-    repo_root = _get_repo_root(canonical_path)
-    output = _run_git(["status", "--porcelain=v1", "-b"], cwd=repo_root)
+    repo_root = _get_repo_root(canonical_path, allowed_root)
+    output = _run_git(["status", "--porcelain=v1", "-b"], cwd=repo_root, max_output_bytes=max_output_bytes)
 
     branch = "unknown"
     upstream: str | None = None
@@ -179,6 +197,8 @@ def git_diff(
     target: str | None = None,
     paths: list[str] | None = None,
     max_lines: int = 500,
+    allowed_root: Path | None = None,
+    max_output_bytes: int = 1_000_000,
 ) -> dict[str, object]:
     """Generate a unified git diff with token-conscious line capping.
 
@@ -192,7 +212,11 @@ def git_diff(
     Returns:
         A dictionary with diff text, stats, and truncation status.
     """
-    repo_root = _get_repo_root(canonical_path)
+    repo_root = _get_repo_root(canonical_path, allowed_root)
+    if max_lines < 1:
+        raise InvalidArgumentError("max_lines", "must be at least 1")
+    if target and target.startswith("-"):
+        raise InvalidArgumentError("target", "revision names beginning with '-' are forbidden")
 
     cmd = ["diff"]
     if cached:
@@ -201,9 +225,9 @@ def git_diff(
         cmd.append(target)
     if paths:
         cmd.append("--")
-        cmd.extend(paths)
+        cmd.extend(_validate_pathspecs(paths, repo_root, allowed_root or repo_root))
 
-    diff_output = _run_git(cmd, cwd=repo_root)
+    diff_output = _run_git(cmd, cwd=repo_root, max_output_bytes=max_output_bytes)
 
     # Compute stat summary
     stat_cmd = [*cmd, "--stat"]
@@ -253,7 +277,7 @@ def git_diff(
     }
 
 
-def export_swebench_patch(canonical_path: Path) -> dict[str, object]:
+def export_swebench_patch(canonical_path: Path, allowed_root: Path | None = None, *, max_output_bytes: int = 1_000_000) -> dict[str, object]:
     """Export a standardized `git diff HEAD` patch for SWE-bench evaluation.
 
     SWE-bench benchmark evaluation harnesses apply model submissions as unified
@@ -267,10 +291,10 @@ def export_swebench_patch(canonical_path: Path) -> dict[str, object]:
     Returns:
         A dictionary with the patch string, change metrics, and untracked warnings.
     """
-    repo_root = _get_repo_root(canonical_path)
+    repo_root = _get_repo_root(canonical_path, allowed_root)
 
     # Full diff against HEAD encompasses both staged and unstaged modifications
-    patch = _run_git(["diff", "HEAD"], cwd=repo_root)
+    patch = _run_git(["diff", "HEAD"], cwd=repo_root, max_output_bytes=max_output_bytes)
 
     # Check for untracked files
     status_out = _run_git(["status", "--porcelain=v1"], cwd=repo_root)
@@ -314,7 +338,7 @@ def export_swebench_patch(canonical_path: Path) -> dict[str, object]:
     }
 
 
-def revert_file(canonical_path: Path) -> dict[str, object]:
+def revert_file(canonical_path: Path, allowed_root: Path | None = None) -> dict[str, object]:
     """Revert uncommitted modifications to a file, restoring it to HEAD.
 
     If the file was modified or deleted in the working directory or staging,
@@ -327,7 +351,8 @@ def revert_file(canonical_path: Path) -> dict[str, object]:
     Returns:
         A dictionary describing the revert action taken.
     """
-    repo_root = _get_repo_root(canonical_path)
+    boundary = (allowed_root or canonical_path.parent).resolve()
+    repo_root = _get_repo_root(canonical_path, boundary)
 
     try:
         rel_path = canonical_path.relative_to(repo_root)
@@ -349,7 +374,7 @@ def revert_file(canonical_path: Path) -> dict[str, object]:
     else:
         # Untracked file: move to trash for safety
         from mcp_fs.vfs import delete_to_trash
-        trash_res = delete_to_trash(canonical_path, repo_root)
+        trash_res = delete_to_trash(canonical_path, boundary)
         return {
             "path": str(canonical_path),
             "relative_path": str(rel_path),
@@ -357,3 +382,24 @@ def revert_file(canonical_path: Path) -> dict[str, object]:
             "detail": f"Untracked file '{rel_path}' safely moved to trash.",
             "trash_path": trash_res.get("trash_path"),
         }
+
+
+def _validate_pathspecs(paths: list[str], repo_root: Path, allowed_root: Path) -> list[str]:
+    validated: list[str] = []
+    for raw in paths:
+        windows = PureWindowsPath(raw)
+        posix = PurePosixPath(raw)
+        if not raw or "\x00" in raw or "\\" in raw or posix.is_absolute() or windows.is_absolute() or windows.drive:
+            raise InvalidArgumentError("paths", f"unsafe pathspec '{raw}'")
+        if raw.startswith(("-", ":")):
+            raise InvalidArgumentError("paths", f"Git option and magic pathspecs are forbidden: '{raw}'")
+        if any(part == ".." for part in posix.parts):
+            raise InvalidArgumentError("paths", f"pathspec traversal is forbidden: '{raw}'")
+        resolved = (repo_root / Path(*posix.parts)).resolve()
+        try:
+            resolved.relative_to(repo_root)
+            resolved.relative_to(allowed_root.resolve())
+        except ValueError as exc:
+            raise InvalidArgumentError("paths", f"pathspec escapes the allowed root: '{raw}'") from exc
+        validated.append(raw)
+    return validated

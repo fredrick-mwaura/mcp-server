@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from mcp_fs.errors import PathNotADirectoryError, PathNotFoundError
+from mcp_fs.errors import InvalidArgumentError, PathNotADirectoryError, PathNotFoundError
 
 # Kind rank used for display sorting: directories first, then files/symlinks.
 _KIND_RANK = {"directory": 0, "file": 1, "symlink": 2}
@@ -113,6 +113,7 @@ def read_file_slice(
     offset: int = 1,
     limit: int = 200,
     max_read_bytes: int = 1_000_000,
+    max_output_bytes: int | None = None,
 ) -> dict[str, object]:
     """Read a window of lines from an approved file, with line-number prefixes.
 
@@ -160,35 +161,56 @@ def read_file_slice(
     if requesting_full_read and stat.st_size > max_read_bytes:
         raise FileTooLargeError(str(canonical_path), stat.st_size, max_read_bytes)
 
-    # Read lines (universal newlines handles \r\n transparently).
+    if offset < 1:
+        raise InvalidArgumentError("offset", "must be at least 1")
+    if limit < 1:
+        raise InvalidArgumentError("limit", "must be at least 1")
+    output_cap = max_output_bytes or max_read_bytes
+
+    # Stream the file. Never materialize all lines, and cap each physical
+    # readline so a single hostile line cannot allocate arbitrary memory.
+    selected: list[tuple[int, str]] = []
+    total_lines = 0
+    produced = 0
+    output_truncated = False
     try:
         with open(canonical_path, "r", encoding="utf-8", errors="replace") as fh:
-            all_lines = fh.readlines()
+            while True:
+                line = fh.readline(output_cap + 1)
+                if line == "":
+                    break
+                total_lines += 1
+                long_line = len(line.encode("utf-8")) > output_cap and not line.endswith(("\n", "\r"))
+                if long_line:
+                    while line and not line.endswith(("\n", "\r")):
+                        line = fh.readline(output_cap + 1)
+                    output_truncated = True
+                    line = "[line omitted: exceeds output byte limit]\n"
+                if offset <= total_lines < offset + limit:
+                    rendered = f"L{total_lines}: {line.rstrip()}"
+                    encoded = len(rendered.encode("utf-8")) + (1 if selected else 0)
+                    if produced + encoded > output_cap:
+                        output_truncated = True
+                    else:
+                        selected.append((total_lines, rendered))
+                        produced += encoded
     except OSError as exc:
         raise PathNotFoundError(str(canonical_path)) from exc
 
-    total_lines = len(all_lines)
+    start_line = selected[0][0] if selected else min(offset, total_lines + 1)
+    end_line = selected[-1][0] if selected else min(offset - 1, total_lines)
 
-    # Clamp offset/limit to valid bounds.
-    start_idx = max(0, offset - 1)  # 1-indexed -> 0-indexed
-    end_idx = min(start_idx + limit, total_lines)
-    selected = all_lines[start_idx:end_idx]
-
-    # Format with line numbers: "L42: content\n" — lets the model reference
-    # exact lines in its edit_block calls without hallucinating line numbers.
-    numbered_lines = []
-    for i, line in enumerate(selected, start=start_idx + 1):
-        # Strip trailing newline; we rebuild structure in the output.
-        numbered_lines.append(f"L{i}: {line.rstrip()}")
-
-    return {
+    result: dict[str, object] = {
         "path": str(canonical_path),
         "is_binary": False,
         "total_lines": total_lines,
-        "range": {"start": start_idx + 1, "end": end_idx, "count": len(selected)},
+        "range": {"start": start_line, "end": end_line, "count": len(selected)},
         "size_bytes": stat.st_size,
-        "content": "\n".join(numbered_lines),
+        "content": "\n".join(rendered for _, rendered in selected),
     }
+    if output_truncated:
+        result["truncated_by_bytes"] = True
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -236,14 +258,17 @@ def find_files(
         dirnames[:] = sorted(
             d for d in dirnames
             if not d.startswith(".") and d != "__pycache__"
+            and not (Path(dirpath) / d).is_symlink()
         )
 
         for filename in sorted(filenames):
             if fnmatch.fnmatch(filename, pattern):
                 full_path = Path(dirpath) / filename
+                if full_path.is_symlink():
+                    continue
                 try:
                     rel = full_path.relative_to(canonical_root)
-                    size = full_path.stat().st_size
+                    size = full_path.lstat().st_size
                 except (ValueError, OSError):
                     continue
                 results.append({
@@ -260,6 +285,11 @@ def find_files(
 # --------------------------------------------------------------------------
 # Phase 3: atomic file writing (crash-safe)
 # --------------------------------------------------------------------------
+
+def ensure_parent_directory(canonical_path: Path) -> None:
+    """Create a validated target's parents; callers must validate the path first."""
+    canonical_path.parent.mkdir(parents=True, exist_ok=True)
+
 
 def write_file_atomic(canonical_path: Path, content: str) -> dict[str, object]:
     """Write content to a file using an atomic swap.
@@ -279,14 +309,17 @@ def write_file_atomic(canonical_path: Path, content: str) -> dict[str, object]:
     Raises:
         PathNotFoundError: the parent directory does not exist.
     """
-    import tempfile
     import uuid
 
     parent = canonical_path.parent
     if not parent.is_dir():
         raise PathNotFoundError(str(parent))
 
+    if canonical_path.exists() and canonical_path.is_dir():
+        from mcp_fs.errors import PathNotAFileError
+        raise PathNotAFileError(str(canonical_path))
     is_new = not canonical_path.exists()
+    existing_mode = canonical_path.stat().st_mode & 0o7777 if not is_new else None
 
     # Write to a sibling temp file in the same directory (same filesystem,
     # so os.replace is guaranteed atomic on POSIX and Windows).
@@ -299,9 +332,18 @@ def write_file_atomic(canonical_path: Path, content: str) -> dict[str, object]:
             fh.flush()
             os.fsync(fh.fileno())  # ensure bytes hit disk before rename
 
+        if existing_mode is not None:
+            os.chmod(tmp_path, existing_mode)
+
         # Atomic replace: if this succeeds, the file is fully written.
         # If the process dies before this line, the original is intact.
         os.replace(tmp_path, canonical_path)
+        if os.name != "nt":
+            dir_fd = os.open(parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
     except BaseException:
         # Clean up the temp file on any failure.
         try:
@@ -345,6 +387,10 @@ def delete_to_trash(canonical_path: Path, root: Path) -> dict[str, object]:
 
     if not os.path.lexists(canonical_path):
         raise PathNotFoundError(str(canonical_path))
+
+    root = root.resolve()
+    if canonical_path == root or canonical_path == root / ".trash" or (root / ".trash") in canonical_path.parents:
+        raise InvalidArgumentError("path", "the allowed root and its trash directory cannot be deleted")
 
     # ARCHITECTURAL DECISION - Why <root>/.trash/ instead of the send2trash package:
     # 1. Security boundary: send2trash targets the OS-wide trash (~/.Trash or

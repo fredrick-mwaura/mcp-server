@@ -140,3 +140,12 @@ def test_run_test_nonexistent_directory(tmp_path: Path) -> None:
     """run_test on a missing directory raises PathNotFoundError."""
     with pytest.raises(PathNotFoundError):
         run_test(tmp_path / "ghost", f"{sys.executable} --version")
+
+
+def test_run_test_caps_captured_output(tmp_path: Path) -> None:
+    res = run_test(
+        tmp_path, f'{sys.executable} -c "print(\'x\' * 100000)"',
+        distill=False, max_output_bytes=1024,
+    )
+    assert len(res["stdout"].encode()) <= 1024
+    assert res["output_truncated"] is True

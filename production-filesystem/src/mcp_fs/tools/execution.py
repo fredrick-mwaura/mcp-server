@@ -18,11 +18,11 @@ from __future__ import annotations
 import os
 import re
 import shlex
-import subprocess
 import time
 from pathlib import Path
 
-from mcp_fs.errors import PathNotFoundError
+from mcp_fs.errors import InvalidArgumentError, PathNotFoundError
+from mcp_fs.process import run_bounded
 
 
 def distill_test_output(
@@ -146,7 +146,7 @@ def distill_test_output(
 
     # If still empty (generic non-zero exit command), return the last lines
     if not distilled_lines:
-        distilled_lines = [l for l in combined.splitlines() if l.strip()][-max_failure_lines:]
+        distilled_lines = [line for line in combined.splitlines() if line.strip()][-max_failure_lines:]
 
     # Truncate notice if capped
     truncated = len(distilled_lines) >= max_failure_lines
@@ -177,6 +177,8 @@ def run_test(
     *,
     timeout: float = 90.0,
     distill: bool = True,
+    max_output_bytes: int = 1_000_000,
+    max_timeout: float = 300.0,
 ) -> dict[str, object]:
     """Execute a test command in the approved working directory.
 
@@ -196,54 +198,45 @@ def run_test(
         raise PathNotFoundError(str(canonical_path))
 
     # Clamp timeout between 1s and 300s
-    clamped_timeout = max(1.0, min(float(timeout), 300.0))
+    if timeout < 1:
+        raise InvalidArgumentError("timeout", "must be at least 1 second")
+    clamped_timeout = min(float(timeout), max_timeout)
 
     cmd_args = shlex.split(command)
     if not cmd_args:
-        return {
-            "status": "error",
-            "command": command,
-            "error": "Command string cannot be empty.",
-        }
+        raise InvalidArgumentError("command", "cannot be empty")
+    if len(command) > 16_384 or len(cmd_args) > 512:
+        raise InvalidArgumentError("command", "is too long")
 
     started = time.perf_counter()
     try:
-        proc = subprocess.run(
-            cmd_args,
-            cwd=str(canonical_path),
-            capture_output=True,
-            text=True,
-            timeout=clamped_timeout,
+        child_env = os.environ.copy()
+        child_env.pop("MCP_FS_AUTH_TOKEN", None)
+        proc = run_bounded(
+            cmd_args, cwd=canonical_path, timeout=clamped_timeout,
+            max_output_bytes=max_output_bytes, env=child_env,
         )
         duration = time.perf_counter() - started
         stdout = proc.stdout
         stderr = proc.stderr
         returncode = proc.returncode
-
-    except subprocess.TimeoutExpired as exc:
-        duration = time.perf_counter() - started
-        return {
-            "status": "timeout",
-            "command": command,
-            "timed_out": True,
-            "timeout_seconds": clamped_timeout,
-            "duration_seconds": round(duration, 2),
-            "summary": f"Test execution timed out after {clamped_timeout}s.",
-            "detail": (
-                f"Process was terminated after exceeding the {clamped_timeout}s timeout limit. "
-                "Check for infinite loops, deadlocks, or hanging network calls."
-            ),
-        }
+        if proc.timed_out:
+            return {
+                "status": "timeout", "command": command, "timed_out": True,
+                "timeout_seconds": clamped_timeout, "duration_seconds": round(duration, 2),
+                "summary": f"Test execution timed out after {clamped_timeout}s.",
+                "detail": "The process tree was terminated after exceeding the timeout.",
+            }
     except FileNotFoundError:
         return {
-            "status": "error",
-            "command": command,
+            "status": "error", "command": command,
             "error": f"Executable '{cmd_args[0]}' not found on system PATH.",
         }
 
     if distill:
         res = distill_test_output(stdout, stderr, returncode, duration)
         res["command"] = command
+        res["output_truncated"] = proc.stdout_truncated or proc.stderr_truncated
         return res
     else:
         return {
@@ -253,4 +246,5 @@ def run_test(
             "duration_seconds": round(duration, 2),
             "stdout": stdout,
             "stderr": stderr,
+            "output_truncated": proc.stdout_truncated or proc.stderr_truncated,
         }

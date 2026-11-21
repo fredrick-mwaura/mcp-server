@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml .
+COPY README.md .
 COPY src/ src/
 
 RUN pip install --no-cache-dir --prefix=/install .
@@ -40,11 +41,13 @@ WORKDIR /workspace
 # Configure default environment for headless container execution
 ENV PYTHONUNBUFFERED=1 \
     MCP_FS_ROOTS=/workspace \
-    MCP_FS_MODE=read-write \
+    MCP_FS_MODE=read-only \
     MCP_FS_TRANSPORT=streamable-http \
     MCP_FS_HOST=0.0.0.0 \
-    MCP_FS_PORT=8000
+    MCP_FS_PORT=8000 \
+    MCP_FS_AUTH_MODE=auto \
+    MCP_FS_ALLOW_EXEC=false
 
 EXPOSE 8000
 
-ENTRYPOINT ["mcp-fs"]
+ENTRYPOINT ["mcp-filesystem-server"]

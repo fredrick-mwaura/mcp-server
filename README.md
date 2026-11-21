@@ -74,7 +74,7 @@ mcp-server/
 ├── README.md                # 👈 you are here
 │
 ├── PRODUCTION_PLAN.md       # next course unit: a production-grade file server
-├── production-filesystem/   #   ...and its Phase 1 implementation
+├── production-filesystem/   #   ...and the hardened Python compatibility implementation
 │
 ├── .venv/                   # virtual env (created in Step 2, not in git)
 └── .gitignore               # keeps .venv/ and __pycache__ out of git

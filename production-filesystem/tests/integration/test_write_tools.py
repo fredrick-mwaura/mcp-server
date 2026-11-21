@@ -291,3 +291,58 @@ def test_apply_patch_empty_is_noop(tmp_path: Path) -> None:
         "patch": "", "path": str(tmp_path),
     })
     assert result["action"] == "no_changes" or result.get("files_modified", 0) == 0
+
+
+def test_apply_patch_rejects_parent_traversal_without_side_effects(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "escaped.txt"
+    outside.unlink(missing_ok=True)
+    patch = (
+        "diff --git a/escaped.txt b/../../escaped.txt\n"
+        "--- /dev/null\n+++ b/../../escaped.txt\n"
+        "@@ -0,0 +1 @@\n+owned\n"
+    )
+    result = _call(_rw_server(tmp_path), "apply_patch", {"patch": patch, "path": str(tmp_path)})
+    assert result["error_code"] == "invalid_patch_path"
+    assert not outside.exists()
+
+
+def test_apply_patch_rejects_absolute_and_windows_paths(tmp_path: Path) -> None:
+    for unsafe in ("/tmp/escaped.txt", "C:/escaped.txt", "\\\\server\\share\\escaped.txt"):
+        patch = f"--- /dev/null\n+++ {unsafe}\n@@ -0,0 +1 @@\n+x\n"
+        result = _call(_rw_server(tmp_path), "apply_patch", {"patch": patch, "path": str(tmp_path)})
+        assert result["error_code"] == "invalid_patch_path"
+
+
+def test_apply_patch_validates_context_before_writing(tmp_path: Path) -> None:
+    target = tmp_path / "code.py"
+    target.write_text("x = 1\n")
+    patch = "--- a/code.py\n+++ b/code.py\n@@ -1 +1 @@\n-x = 2\n+x = 3\n"
+    result = _call(_rw_server(tmp_path), "apply_patch", {"patch": patch, "path": str(tmp_path)})
+    assert result["error_code"] == "patch_conflict"
+    assert target.read_text() == "x = 1\n"
+
+
+def test_apply_patch_creates_and_deletes_files(tmp_path: Path) -> None:
+    create = "--- /dev/null\n+++ b/nested/new.txt\n@@ -0,0 +1 @@\n+hello\n"
+    result = _call(_rw_server(tmp_path), "apply_patch", {"patch": create, "path": str(tmp_path)})
+    assert result["operations"] == [{"file": "nested/new.txt", "action": "created"}]
+    assert (tmp_path / "nested/new.txt").read_text() == "hello\n"
+    delete = "--- a/nested/new.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-hello\n"
+    result = _call(_rw_server(tmp_path), "apply_patch", {"patch": delete, "path": str(tmp_path)})
+    assert result["operations"] == [{"file": "nested/new.txt", "action": "deleted"}]
+    assert not (tmp_path / "nested/new.txt").exists()
+
+
+def test_apply_patch_preflights_all_files_before_mutation(tmp_path: Path) -> None:
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("x = 1\n")
+    second.write_text("y = 1\n")
+    patch = (
+        "--- a/first.py\n+++ b/first.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+        "--- a/second.py\n+++ b/second.py\n@@ -1 +1 @@\n-y = 1\n+if broken\n"
+    )
+    result = _call(_rw_server(tmp_path), "apply_patch", {"patch": patch, "path": str(tmp_path)})
+    assert result["error_code"] == "syntax_error"
+    assert first.read_text() == "x = 1\n"
+    assert second.read_text() == "y = 1\n"

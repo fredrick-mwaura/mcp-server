@@ -1,32 +1,22 @@
-"""editing.py - surgical code editing tools (Phase 3).
-
-These tools are the write-path counterparts to Phase 2's read tools. Each one
-is designed to minimize the tokens an LLM needs to spend on code modifications:
-
-  edit_block:   Replace a unique string chunk in a file. The model emits only
-                the target and replacement (~50 tokens) instead of rewriting
-                the entire file (~2,000 tokens). Dry-run mode lets it preview.
-
-  write_file:   Create or overwrite a file atomically. Crash-safe via
-                tempfile + os.replace.
-
-  apply_patch:  Apply a standard unified diff string. The native format for
-                SWE-bench patch submission.
-
-  delete_entry: Move a file/directory to .trash/ instead of permanent delete.
-                Recoverable if the agent makes a mistake.
-
-All handlers receive ALREADY-APPROVED canonical paths. The security decision
-and mode gate happen in the server.py layer above.
-"""
+"""Workspace-scoped, transactional editing operations."""
 
 from __future__ import annotations
 
 import os
+import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 from mcp_fs import vfs
-from mcp_fs.errors import EditTargetNotFoundError, PathNotFoundError
+from mcp_fs.errors import (
+    EditTargetNotFoundError,
+    InvalidArgumentError,
+    InvalidPatchPathError,
+    PatchConflictError,
+    PathNotFoundError,
+)
+from mcp_fs.security import resolve_patch_target, validate_python_syntax
 
 
 def edit_block(
@@ -36,211 +26,252 @@ def edit_block(
     *,
     dry_run: bool = False,
 ) -> dict[str, object]:
-    """Replace a unique target string in a file with new content.
-
-    This is the highest-ROI editing operation: the model sends only the chunk
-    to find and its replacement, saving ~90% of completion tokens compared to
-    rewriting the entire file.
-
-    Args:
-        canonical_path:      An approved, canonical, existing file path.
-        target_content:      The exact text to find and replace (must be unique).
-        replacement_content: The text to replace the target with.
-        dry_run:             If True, report what would happen without modifying.
-
-    Returns:
-        A result dict with the edit outcome.
-
-    Raises:
-        PathNotFoundError:       file doesn't exist.
-        EditTargetNotFoundError: target not found or found multiple times.
-    """
     if not os.path.lexists(canonical_path):
         raise PathNotFoundError(str(canonical_path))
     if os.path.isdir(canonical_path):
         from mcp_fs.errors import PathNotAFileError
         raise PathNotAFileError(str(canonical_path))
-
-    try:
-        original = canonical_path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        raise PathNotFoundError(str(canonical_path)) from exc
-
-    # Count occurrences of the target string.
+    original = canonical_path.read_text(encoding="utf-8", errors="replace")
     count = original.count(target_content)
     if count != 1:
         raise EditTargetNotFoundError(str(canonical_path), count)
-
-    # Build the new content.
-    new_content = original.replace(target_content, replacement_content, 1)
-
     if dry_run:
         return {
-            "path": str(canonical_path),
-            "action": "dry_run",
-            "would_replace": True,
-            "target_found": True,
-            "occurrences": 1,
+            "path": str(canonical_path), "action": "dry_run",
+            "would_replace": True, "target_found": True, "occurrences": 1,
         }
-
     return {
         "path": str(canonical_path),
-        "new_content": new_content,
+        "new_content": original.replace(target_content, replacement_content, 1),
         "action": "edit_ready",
     }
 
 
 def write_file(canonical_path: Path, content: str) -> dict[str, object]:
-    """Create or overwrite a file atomically.
-
-    Args:
-        canonical_path: An approved, canonical path. Parent dir must exist.
-        content:        The full file content.
-
-    Returns:
-        A result dict with path, size, and action (created/overwritten).
-    """
     return vfs.write_file_atomic(canonical_path, content)
 
 
-def delete_entry(
-    canonical_path: Path,
-    root: Path,
-) -> dict[str, object]:
-    """Move a file or directory to .trash/ for safe deletion.
-
-    Args:
-        canonical_path: An approved, canonical, existing path.
-        root:           The allowed root this path belongs to.
-
-    Returns:
-        A result dict with original path and trash destination.
-    """
+def delete_entry(canonical_path: Path, root: Path) -> dict[str, object]:
     return vfs.delete_to_trash(canonical_path, root)
 
 
-def apply_patch(canonical_root: Path, patch_str: str) -> dict[str, object]:
-    """Apply a unified diff patch to files under an approved root.
+@dataclass(frozen=True)
+class Hunk:
+    old_start: int
+    old_count: int
+    new_start: int
+    new_count: int
+    lines: tuple[str, ...]
 
-    Uses Python's difflib for basic patch application. For complex patches,
-    falls back to the `patch` command if available.
 
-    Args:
-        canonical_root: The root directory the patch is relative to.
-        patch_str:      A unified diff string (as from `git diff`).
+@dataclass(frozen=True)
+class FilePatch:
+    old_path: str | None
+    new_path: str | None
+    hunks: tuple[Hunk, ...]
 
-    Returns:
-        A result dict with the files modified and any errors.
-    """
-    import re
 
-    if not patch_str.strip():
-        return {
-            "root": str(canonical_root),
-            "action": "no_changes",
-            "files_modified": 0,
-            "errors": [],
-        }
+@dataclass(frozen=True)
+class PlannedChange:
+    path: Path
+    relative_path: str
+    operation: str
+    old_content: str | None
+    new_content: str | None
+    old_mode: int | None
 
-    # Parse the unified diff into per-file hunks.
-    files_modified: list[str] = []
-    errors: list[str] = []
-    results: list[dict[str, object]] = []
 
-    # Split into per-file diffs.
-    file_diffs = re.split(r"(?=^diff )", patch_str, flags=re.MULTILINE)
+_HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
-    for file_diff in file_diffs:
-        if not file_diff.strip():
+
+def _header_path(line: str, marker: str) -> str | None:
+    raw = line[len(marker):].strip().split("\t", 1)[0]
+    if raw == "/dev/null":
+        return None
+    if raw.startswith("a/") or raw.startswith("b/"):
+        raw = raw[2:]
+    return raw
+
+
+def _parse_patch(patch: str) -> list[FilePatch]:
+    if "GIT binary patch" in patch or "Binary files " in patch:
+        raise InvalidArgumentError("patch", "binary patches are not supported")
+    forbidden = ("rename from ", "rename to ", "copy from ", "copy to ", "old mode ", "new mode ")
+    if any(line.startswith(forbidden) for line in patch.splitlines()):
+        raise InvalidArgumentError("patch", "renames, copies, mode changes, and symlinks are not supported")
+    for line in patch.splitlines():
+        if line.startswith(("new file mode ", "deleted file mode ")) and not line.endswith("100644"):
+            raise InvalidArgumentError("patch", "symlink and executable file modes are not supported")
+
+    lines = patch.splitlines(keepends=True)
+    files: list[FilePatch] = []
+    index = 0
+    while index < len(lines):
+        if not lines[index].startswith("--- "):
+            index += 1
             continue
-
-        # Extract target file path from --- and +++ lines.
-        minus_match = re.search(r"^--- a/(.+)$", file_diff, re.MULTILINE)
-        plus_match = re.search(r"^\+\+\+ b/(.+)$", file_diff, re.MULTILINE)
-
-        if not plus_match:
-            continue
-
-        rel_path = plus_match.group(1)
-        target_path = canonical_root / rel_path
-
-        # Check if it's a new file (--- /dev/null).
-        is_new_file = minus_match and minus_match.group(1) == "/dev/null"
-
-        # Extract hunks.
-        hunks = re.findall(
-            r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@.*?\n((?:[ +\-].*\n)*)",
-            file_diff,
-            re.MULTILINE,
-        )
-
-        if not hunks and not is_new_file:
-            errors.append(f"No hunks found for {rel_path}")
-            continue
-
-        try:
-            if is_new_file:
-                # New file: extract all + lines as content.
-                add_lines = []
-                for line in file_diff.splitlines():
-                    if line.startswith("+") and not line.startswith("+++"):
-                        add_lines.append(line[1:])
-                new_content = "\n".join(add_lines) + "\n" if add_lines else ""
-                results.append({
-                    "file": rel_path,
-                    "new_content": new_content,
-                    "is_new": True,
-                })
-            else:
-                # Existing file: apply hunks in reverse order to preserve offsets.
-                if not target_path.exists():
-                    errors.append(f"File not found: {rel_path}")
+        old_path = _header_path(lines[index], "--- ")
+        index += 1
+        if index >= len(lines) or not lines[index].startswith("+++ "):
+            raise InvalidArgumentError("patch", "each --- header must be followed by +++")
+        new_path = _header_path(lines[index], "+++ ")
+        index += 1
+        if old_path is None and new_path is None:
+            raise InvalidPatchPathError("/dev/null", "a patch must have a source or target")
+        if old_path is not None and new_path is not None and old_path != new_path:
+            raise InvalidArgumentError("patch", "renames are not supported")
+        hunks: list[Hunk] = []
+        while index < len(lines):
+            if lines[index].startswith("--- ") or lines[index].startswith("diff --git "):
+                break
+            match = _HUNK.match(lines[index])
+            if not match:
+                index += 1
+                continue
+            old_start = int(match.group(1))
+            old_count = int(match.group(2) or "1")
+            new_start = int(match.group(3))
+            new_count = int(match.group(4) or "1")
+            index += 1
+            body: list[str] = []
+            while index < len(lines):
+                line = lines[index]
+                if _HUNK.match(line) or line.startswith("--- ") or line.startswith("diff --git "):
+                    break
+                if line.startswith("\\ No newline at end of file"):
+                    if body:
+                        body[-1] = body[-1].rstrip("\r\n")
+                    index += 1
                     continue
+                if not line or line[0] not in " +-":
+                    break
+                body.append(line)
+                index += 1
+            actual_old = sum(1 for line in body if line[0] in " -")
+            actual_new = sum(1 for line in body if line[0] in " +")
+            if actual_old != old_count or actual_new != new_count:
+                raise InvalidArgumentError("patch", "hunk line counts do not match its header")
+            hunks.append(Hunk(old_start, old_count, new_start, new_count, tuple(body)))
+        if not hunks:
+            raise InvalidArgumentError("patch", "file patch contains no hunks")
+        files.append(FilePatch(old_path, new_path, tuple(hunks)))
+    if not files:
+        raise InvalidArgumentError("patch", "no unified-diff file headers found")
+    return files
 
-                original = target_path.read_text(encoding="utf-8", errors="replace")
-                lines = original.splitlines(keepends=True)
 
-                # Apply hunks in reverse order (last hunk first) so line
-                # numbers from earlier hunks remain valid.
-                sorted_hunks = sorted(hunks, key=lambda h: int(h[0]), reverse=True)
-                for orig_start, new_start, hunk_body in sorted_hunks:
-                    orig_idx = int(orig_start) - 1  # 0-indexed
+def _apply_hunks(path: str, original: str, hunks: tuple[Hunk, ...]) -> str:
+    source = original.splitlines(keepends=True)
+    output: list[str] = []
+    cursor = 0
+    for hunk in hunks:
+        start = max(0, hunk.old_start - 1)
+        if start < cursor or start > len(source):
+            raise PatchConflictError(path, f"invalid hunk location {hunk.old_start}")
+        output.extend(source[cursor:start])
+        position = start
+        for raw in hunk.lines:
+            marker, text = raw[0], raw[1:]
+            if marker in " -":
+                if position >= len(source) or source[position] != text:
+                    raise PatchConflictError(path, f"context mismatch near source line {position + 1}")
+                if marker == " ":
+                    output.append(source[position])
+                position += 1
+            elif marker == "+":
+                output.append(text)
+        cursor = position
+    output.extend(source[cursor:])
+    return "".join(output)
 
-                    # Parse hunk lines.
-                    remove_count = 0
-                    add_lines: list[str] = []
-                    for hunk_line in hunk_body.splitlines(keepends=True):
-                        if hunk_line.startswith("-"):
-                            remove_count += 1
-                        elif hunk_line.startswith("+"):
-                            add_lines.append(hunk_line[1:])
-                        elif hunk_line.startswith(" "):
-                            add_lines.append(hunk_line[1:])
 
-                    # Replace the original lines with patched lines.
-                    context_and_removed = 0
-                    for hunk_line in hunk_body.splitlines():
-                        if hunk_line.startswith("-") or hunk_line.startswith(" "):
-                            context_and_removed += 1
+def _build_plan(
+    root: Path,
+    patches: list[FilePatch],
+    allowed_roots: Sequence[str | Path],
+    max_write_bytes: int,
+) -> list[PlannedChange]:
+    plan: list[PlannedChange] = []
+    seen: set[Path] = set()
+    for file_patch in patches:
+        relative = file_patch.new_path or file_patch.old_path
+        assert relative is not None
+        is_create = file_patch.old_path is None
+        is_delete = file_patch.new_path is None
+        target = resolve_patch_target(root, relative, allowed_roots, must_exist=not is_create)
+        if is_create and target.exists():
+            raise PatchConflictError(relative, "create target already exists")
+        if not is_create and not target.is_file():
+            raise PatchConflictError(relative, "patch targets must be regular files")
+        if target in seen:
+            raise InvalidArgumentError("patch", f"duplicate target '{relative}'")
+        seen.add(target)
+        old_content = None if is_create else target.read_text(encoding="utf-8")
+        new_content = _apply_hunks(relative, old_content or "", file_patch.hunks)
+        if is_delete:
+            if new_content:
+                raise PatchConflictError(relative, "deletion patch did not remove the complete file")
+            operation = "deleted"
+            final_content = None
+        else:
+            operation = "created" if is_create else "modified"
+            final_content = new_content
+            if len(final_content.encode("utf-8")) > max_write_bytes:
+                raise InvalidArgumentError("patch", f"result for '{relative}' exceeds the write limit")
+            validate_python_syntax(final_content, target)
+        old_mode = None if is_create else target.stat().st_mode & 0o7777
+        plan.append(PlannedChange(target, relative, operation, old_content, final_content, old_mode))
+    return plan
 
-                    lines[orig_idx:orig_idx + context_and_removed] = add_lines
 
-                new_content = "".join(lines)
-                results.append({
-                    "file": rel_path,
-                    "new_content": new_content,
-                    "is_new": False,
-                })
-
-            files_modified.append(rel_path)
-        except Exception as exc:
-            errors.append(f"Error applying patch to {rel_path}: {exc}")
-
+def apply_patch(
+    canonical_root: Path,
+    patch_str: str,
+    *,
+    allowed_roots: Sequence[str | Path] | None = None,
+    max_write_bytes: int = 5_000_000,
+) -> dict[str, object]:
+    """Preflight and atomically commit the supported unified-diff subset."""
+    if not patch_str.strip():
+        return {"root": str(canonical_root), "action": "no_changes", "files_modified": 0, "files": [], "errors": []}
+    plan = _build_plan(canonical_root, _parse_patch(patch_str), allowed_roots or [canonical_root], max_write_bytes)
+    committed: list[PlannedChange] = []
+    created_directories: set[Path] = set()
+    try:
+        for change in plan:
+            if change.new_content is None:
+                change.path.unlink()
+            else:
+                parent = change.path.parent
+                while not parent.exists() and parent != canonical_root:
+                    created_directories.add(parent)
+                    parent = parent.parent
+                vfs.ensure_parent_directory(change.path)
+                vfs.write_file_atomic(change.path, change.new_content)
+            committed.append(change)
+    except Exception:
+        for change in reversed(committed):
+            try:
+                if change.old_content is None:
+                    change.path.unlink(missing_ok=True)
+                else:
+                    vfs.ensure_parent_directory(change.path)
+                    vfs.write_file_atomic(change.path, change.old_content)
+                    if change.old_mode is not None:
+                        change.path.chmod(change.old_mode)
+            except Exception:
+                pass
+        for directory in sorted(created_directories, key=lambda item: len(item.parts), reverse=True):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        raise
     return {
         "root": str(canonical_root),
-        "action": "patch_parsed",
-        "files_modified": len(files_modified),
-        "files": files_modified,
-        "results": results,
-        "errors": errors,
+        "action": "patch_applied",
+        "files_modified": len(plan),
+        "files": [change.relative_path for change in plan],
+        "operations": [{"file": change.relative_path, "action": change.operation} for change in plan],
+        "errors": [],
     }

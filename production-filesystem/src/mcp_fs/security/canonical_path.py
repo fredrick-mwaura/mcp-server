@@ -28,10 +28,10 @@ The ordering below is deliberate and must never be re-arranged casually:
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Sequence
 
-from mcp_fs.errors import PathNotAllowedError, PathNotFoundError
+from mcp_fs.errors import InvalidPatchPathError, PathNotAllowedError, PathNotFoundError
 
 
 def canonical_root(root: str | Path) -> Path:
@@ -116,3 +116,32 @@ def _is_within(candidate: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def resolve_patch_target(
+    base: Path,
+    untrusted_path: str,
+    allowed_roots: Sequence[str | Path],
+    *,
+    must_exist: bool,
+) -> Path:
+    """Resolve a patch filename under both its base and owning allowed root."""
+    raw = untrusted_path.strip()
+    windows = PureWindowsPath(raw)
+    posix = PurePosixPath(raw)
+    if not raw or raw == "." or "\x00" in raw:
+        raise InvalidPatchPathError(untrusted_path, "empty, dot, and NUL paths are forbidden")
+    if "\\" in raw or posix.is_absolute() or windows.is_absolute() or windows.drive:
+        raise InvalidPatchPathError(untrusted_path, "absolute, drive-qualified, UNC, and backslash paths are forbidden")
+    if any(part == ".." for part in posix.parts):
+        raise InvalidPatchPathError(untrusted_path, "parent traversal is forbidden")
+    candidate = resolve_allowed_path(str(base / Path(*posix.parts)), allowed_roots, must_exist=must_exist)
+    base_real = Path(os.path.realpath(base))
+    if not _is_within(candidate, base_real):
+        raise InvalidPatchPathError(untrusted_path, "target escapes the patch base directory")
+    parent = candidate.parent
+    while not parent.exists() and parent != parent.parent:
+        parent = parent.parent
+    if not _is_within(Path(os.path.realpath(parent)), base_real):
+        raise InvalidPatchPathError(untrusted_path, "parent resolves outside the patch base directory")
+    return candidate

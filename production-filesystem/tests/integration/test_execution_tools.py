@@ -35,7 +35,7 @@ def _call(server, tool: str, arguments: dict) -> dict:
 
 
 def _rw_server(root: Path):
-    settings = Settings(roots=[str(root)], mode="read-write", transport="stdio")
+    settings = Settings(roots=[str(root)], mode="read-write", transport="stdio", allow_exec=True)
     return build_server(settings)
 
 
@@ -52,6 +52,14 @@ def test_run_test_blocked_in_readonly_mode(tmp_path: Path) -> None:
         "path": str(tmp_path),
     })
     assert res["error_code"] == "read_only_mode"
+
+
+def test_run_test_requires_separate_execution_opt_in(tmp_path: Path) -> None:
+    server = build_server(Settings(roots=[str(tmp_path)], mode="read-write"))
+    res = _call(server, "run_test", {
+        "command": f"{sys.executable} --version", "path": str(tmp_path),
+    })
+    assert res["error_code"] == "execution_disabled"
 
 
 def test_run_test_blocks_path_traversal(tmp_path: Path) -> None:

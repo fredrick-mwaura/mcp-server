@@ -31,12 +31,12 @@ Phase 5 tools:
     - execution.run_test           (write/exec, bounded runner with failure distillation)
 """
 
-from mcp_fs.tools.navigation import list_directory, read_file, find_files
-from mcp_fs.tools.search import grep_search
+from mcp_fs.tools.editing import apply_patch, delete_entry, edit_block, write_file
+from mcp_fs.tools.execution import distill_test_output, run_test
+from mcp_fs.tools.git_ops import export_swebench_patch, git_diff, git_status, revert_file
+from mcp_fs.tools.navigation import find_files, list_directory, read_file
 from mcp_fs.tools.outline import symbol_outline
-from mcp_fs.tools.editing import edit_block, write_file, delete_entry, apply_patch
-from mcp_fs.tools.git_ops import git_status, git_diff, export_swebench_patch, revert_file
-from mcp_fs.tools.execution import run_test, distill_test_output
+from mcp_fs.tools.search import grep_search
 
 __all__ = [
     "list_directory",

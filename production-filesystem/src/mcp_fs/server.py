@@ -18,24 +18,33 @@ LESSON - closures as dependency injection:
 
 from __future__ import annotations
 
+import hmac
 import logging
-from pathlib import Path
 import sys
 import time
+from pathlib import Path
 
-from pydantic import ValidationError
-
-from mcp_fs.config import Settings
-from mcp_fs.errors import FileSystemError, ReadOnlyModeError
-from mcp_fs.security import canonical_root, resolve_allowed_path, validate_python_syntax
-from mcp_fs.telemetry import configure_logging
-from mcp_fs.tools import navigation, search, outline, editing, git_ops, execution
-from mcp_fs import __version__
+from mcp.server.auth.provider import AccessToken, TokenVerifier
+from mcp.server.auth.settings import AuthSettings
 
 # --- SDK v2 --------------------------------------------------------------
 # The official high-level MCP class. Lesson 1 already used it; here it serves
 # the SAME API but we register tools built at runtime, not module level.
 from mcp.server.mcpserver import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import ValidationError
+
+from mcp_fs import __version__
+from mcp_fs.config import Settings
+from mcp_fs.errors import (
+    ExecutionDisabledError,
+    FileSystemError,
+    InvalidArgumentError,
+    ReadOnlyModeError,
+)
+from mcp_fs.security import canonical_root, resolve_allowed_path, validate_python_syntax
+from mcp_fs.telemetry import configure_logging
+from mcp_fs.tools import editing, execution, git_ops, navigation, outline, search
 
 logger = logging.getLogger("mcp_fs")
 
@@ -47,7 +56,7 @@ def _validate_roots(settings: Settings) -> list:
     the server at startup with a clear message, not silently produce
     path_not_allowed errors for everything the agent tries.
     """
-    roots = [canonical_root(r) for r in settings.roots]
+    roots = list(dict.fromkeys(canonical_root(r) for r in settings.roots))
     missing = [str(r) for r in roots if not r.exists() or not r.is_dir()]
     if missing:
         raise ValueError(
@@ -55,7 +64,30 @@ def _validate_roots(settings: Settings) -> list:
             + ", ".join(missing)
             + " (set MCP_FS_ROOTS to a comma-separated list of directories.)"
         )
-    return roots
+    return sorted(roots, key=lambda path: len(path.parts), reverse=True)
+
+
+class StaticTokenVerifier(TokenVerifier):
+    """Constant-time verifier for deployment-provided bearer tokens."""
+
+    def __init__(self, token: str) -> None:
+        self._token = token
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if not hmac.compare_digest(token.encode(), self._token.encode()):
+            return None
+        return AccessToken(token=token, client_id="mcp-filesystem-client", scopes=[])
+
+
+def http_transport_security(settings: Settings) -> TransportSecuritySettings:
+    hosts = settings.allowed_hosts or [
+        f"{settings.host}:*", "localhost:*", "127.0.0.1:*", "[::1]:*",
+    ]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=settings.allowed_origins,
+    )
 
 
 def build_server(settings: Settings) -> MCPServer:
@@ -70,12 +102,18 @@ def build_server(settings: Settings) -> MCPServer:
     # Capture config limits into the closure scope.
     max_read_lines = settings.max_read_lines
     max_read_bytes = settings.max_read_bytes
+    max_output_bytes = settings.max_output_bytes
     server_mode = settings.mode
 
     def _require_write_mode(tool_name: str) -> None:
         """Raise ReadOnlyModeError if the server is not in read-write mode."""
         if server_mode != "read-write":
             raise ReadOnlyModeError(tool_name)
+
+    def _require_execution() -> None:
+        _require_write_mode("run_test")
+        if not settings.allow_exec:
+            raise ExecutionDisabledError()
 
     def _find_root_for(canonical: Path) -> Path:
         """Find which allowed root a canonical path belongs to."""
@@ -108,10 +146,17 @@ def build_server(settings: Settings) -> MCPServer:
         + "\nPrefer absolute paths inside an allowed root."
     )
 
+    auth = None
+    verifier = None
+    if settings.effective_auth_mode == "bearer":
+        token = settings.auth_token.get_secret_value() if settings.auth_token else ""
+        scheme_host = "localhost" if settings.host in {"0.0.0.0", "::"} else settings.host
+        base_url = f"http://{scheme_host}:{settings.port}"
+        auth = AuthSettings(issuer_url=base_url, resource_server_url=f"{base_url}/mcp")
+        verifier = StaticTokenVerifier(token)
     mcp = MCPServer(
-        "File System Server",
-        version=__version__,
-        instructions=instructions,
+        "File System Server", version=__version__, instructions=instructions,
+        auth=auth, token_verifier=verifier,
     )
 
     # =================================================================
@@ -187,12 +232,15 @@ def build_server(settings: Settings) -> MCPServer:
         logger.info("tool_call", extra={"tool": "read_file", "path": path, "offset": offset, "limit": limit})
         try:
             canonical = resolve_allowed_path(path, root_strings, must_exist=True)
+            if offset < 1 or limit < 1:
+                raise InvalidArgumentError("read bounds", "offset and limit must be at least 1")
             clamped_limit = min(limit, max_read_lines)
             result = navigation.read_file(
                 canonical,
                 offset=offset,
                 limit=clamped_limit,
                 max_read_bytes=max_read_bytes,
+                max_output_bytes=max_output_bytes,
             )
             logger.info(
                 "tool_result",
@@ -238,6 +286,8 @@ def build_server(settings: Settings) -> MCPServer:
         logger.info("tool_call", extra={"tool": "find_files", "pattern": pattern, "path": path})
         try:
             canonical = resolve_allowed_path(path, root_strings, must_exist=True)
+            if max_results < 1:
+                raise InvalidArgumentError("max_results", "must be at least 1")
             result = navigation.find_files(
                 canonical,
                 pattern,
@@ -303,6 +353,7 @@ def build_server(settings: Settings) -> MCPServer:
                 include_globs=include_globs,
                 max_results=min(max_results, 100),
                 context_lines=min(context_lines, 5),
+                max_output_bytes=max_output_bytes,
             )
             logger.info(
                 "tool_result",
@@ -461,6 +512,8 @@ def build_server(settings: Settings) -> MCPServer:
         logger.info("tool_call", extra={"tool": "write_file", "path": path})
         try:
             _require_write_mode("write_file")
+            if len(content.encode("utf-8")) > settings.max_write_bytes:
+                raise InvalidArgumentError("content", "exceeds MCP_FS_MAX_WRITE_BYTES")
             canonical = resolve_allowed_path(path, root_strings, must_exist=False)
             # AST syntax gate for Python files.
             validate_python_syntax(content, canonical)
@@ -509,38 +562,14 @@ def build_server(settings: Settings) -> MCPServer:
         try:
             _require_write_mode("apply_patch")
             canonical = resolve_allowed_path(path, root_strings, must_exist=True)
-            parse_result = editing.apply_patch(canonical, patch)
-
-            # Apply each parsed file result with syntax validation.
-            applied_files: list[str] = []
-            errors: list[str] = list(parse_result.get("errors", []))
-
-            for file_result in parse_result.get("results", []):
-                rel_path = file_result["file"]
-                new_content = file_result["new_content"]
-                target_path = canonical / rel_path
-
-                try:
-                    validate_python_syntax(new_content, target_path)
-                    from mcp_fs import vfs
-                    if file_result.get("is_new"):
-                        target_path.parent.mkdir(parents=True, exist_ok=True)
-                    vfs.write_file_atomic(target_path, new_content)
-                    applied_files.append(rel_path)
-                except FileSystemError as file_exc:
-                    errors.append(f"{rel_path}: {file_exc.message}")
-
-            result = {
-                "root": str(canonical),
-                "action": "patch_applied",
-                "files_modified": len(applied_files),
-                "files": applied_files,
-                "errors": errors,
-            }
+            result = editing.apply_patch(
+                canonical, patch, allowed_roots=roots,
+                max_write_bytes=settings.max_write_bytes,
+            )
             logger.info(
                 "tool_result",
                 extra={"tool": "apply_patch", "ok": True,
-                       "files": len(applied_files),
+                       "files": result.get("files_modified", 0),
                        "duration_ms": _ms_since(started)},
             )
             return result
@@ -622,7 +651,9 @@ def build_server(settings: Settings) -> MCPServer:
         logger.info("tool_call", extra={"tool": "git_status", "path": path})
         try:
             canonical = resolve_allowed_path(path, root_strings, must_exist=True)
-            result = git_ops.git_status(canonical)
+            result = git_ops.git_status(
+                canonical, _find_root_for(canonical), max_output_bytes=max_output_bytes,
+            )
             logger.info(
                 "tool_result",
                 extra={"tool": "git_status", "ok": True,
@@ -680,6 +711,8 @@ def build_server(settings: Settings) -> MCPServer:
                 target=target,
                 paths=paths,
                 max_lines=max_lines,
+                allowed_root=_find_root_for(canonical),
+                max_output_bytes=max_output_bytes,
             )
             logger.info(
                 "tool_result",
@@ -724,7 +757,9 @@ def build_server(settings: Settings) -> MCPServer:
         logger.info("tool_call", extra={"tool": "export_swebench_patch", "path": path})
         try:
             canonical = resolve_allowed_path(path, root_strings, must_exist=True)
-            result = git_ops.export_swebench_patch(canonical)
+            result = git_ops.export_swebench_patch(
+                canonical, _find_root_for(canonical), max_output_bytes=max_output_bytes,
+            )
             logger.info(
                 "tool_result",
                 extra={"tool": "export_swebench_patch", "ok": True,
@@ -768,7 +803,7 @@ def build_server(settings: Settings) -> MCPServer:
         try:
             _require_write_mode("revert_file")
             canonical = resolve_allowed_path(path, root_strings, must_exist=True)
-            result = git_ops.revert_file(canonical)
+            result = git_ops.revert_file(canonical, _find_root_for(canonical))
             logger.info(
                 "tool_result",
                 extra={"tool": "revert_file", "ok": True,
@@ -815,15 +850,17 @@ def build_server(settings: Settings) -> MCPServer:
             distilled failure outputs.
         """
         started = time.perf_counter()
-        logger.info("tool_call", extra={"tool": "run_test", "command": command, "path": path})
+        logger.info("tool_call", extra={"tool": "run_test", "executable": command.split(maxsplit=1)[0] if command.strip() else "", "path": path})
         try:
-            _require_write_mode("run_test")
+            _require_execution()
             canonical = resolve_allowed_path(path, root_strings, must_exist=True)
             result = execution.run_test(
                 canonical,
                 command,
                 timeout=timeout,
                 distill=distill,
+                max_output_bytes=max_output_bytes,
+                max_timeout=settings.max_test_timeout,
             )
             logger.info(
                 "tool_result",
@@ -867,6 +904,16 @@ def main() -> int:
 
     configure_logging(settings.log_level, settings.log_format)
 
+    if (
+        settings.transport == "streamable-http"
+        and settings.effective_auth_mode == "none"
+        and settings.allow_unsafe_remote
+    ):
+        logger.critical(
+            "unsafe_remote_http_enabled",
+            extra={"host": settings.host, "reason": "explicit development override"},
+        )
+
     try:
         server = build_server(settings)
     except ValueError as exc:
@@ -882,6 +929,8 @@ def main() -> int:
             "transport": settings.transport,
             "host": settings.host,
             "port": settings.port,
+            "auth_enabled": settings.effective_auth_mode == "bearer",
+            "execution_enabled": settings.allow_exec,
         },
     )
 
@@ -892,6 +941,8 @@ def main() -> int:
             transport="streamable-http",
             host=settings.host,
             port=settings.port,
+            max_request_body_size=settings.max_http_body_bytes,
+            transport_security=http_transport_security(settings),
         )
     else:
         logger.info("Listening on stdio. Connect me to an MCP client such as opencode.")

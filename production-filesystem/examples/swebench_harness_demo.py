@@ -73,6 +73,7 @@ def run_demo() -> None:
             roots=[str(repo_root)],
             mode="read-write",
             transport="stdio",
+            allow_exec=True,
         )
         server = build_server(settings)
 
@@ -115,7 +116,7 @@ def run_demo() -> None:
             replacement_content="return a / / b  # INVALID SYNTAX!",
         )
         assert bad_res.get("error_code") == "syntax_error" or "syntax" in str(bad_res)
-        print(f"  ✓ syntax_guard intercepted syntax error before disk write:")
+        print("  ✓ syntax_guard intercepted syntax error before disk write:")
         print(f"    Code: {bad_res.get('error_code')}")
 
         # Step 5: Surgical edit fix
@@ -126,17 +127,18 @@ def run_demo() -> None:
             target_content="return 0.0  # BUG: should be a / b",
             replacement_content="return float(a / b)",
         )
-        print(f"  ✓ edit_block applied atomically (verified AST syntax):")
+        print("  ✓ edit_block applied atomically (verified AST syntax):")
         print(f"    Action: {good_res.get('action')}, size: {good_res.get('size_bytes')} bytes")
 
         # Step 6: Test verification & failure distillation
         print("\n[Stage 5: Test Execution & Patch Export]")
         test_res = call("run_test", command=f"{sys.executable} -m pytest test_calc.py", path=str(repo_root))
-        print(f"  ✓ run_test status: passed={test_res.get('passed')}, exit_code={test_res.get('exit_code')}")
+        assert test_res.get("status") == "passed", test_res
+        print(f"  ✓ run_test status: {test_res['status']}, exit_code={test_res.get('exit_code')}")
 
         # Step 7: Export SWE-bench submission patch
         patch_res = call("export_swebench_patch", path=str(repo_root))
-        print(f"  ✓ export_swebench_patch generated submission diff:")
+        print("  ✓ export_swebench_patch generated submission diff:")
         print(f"    Files changed: {patch_res['files_changed']}, +{patch_res['insertions']} -{patch_res['deletions']}")
         for pline in patch_res["patch"].splitlines():
             print(f"    {pline}")

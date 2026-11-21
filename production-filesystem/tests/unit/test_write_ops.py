@@ -10,8 +10,7 @@ from pathlib import Path
 import pytest
 
 from mcp_fs.errors import PathNotFoundError
-from mcp_fs.vfs import write_file_atomic, delete_to_trash
-
+from mcp_fs.vfs import delete_to_trash, write_file_atomic
 
 # =================================================================
 # write_file_atomic

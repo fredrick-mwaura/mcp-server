@@ -204,3 +204,38 @@ class GitCommandError(FileSystemError):
             f"git command '{command}' failed (exit code {returncode}): {self.stderr}"
         )
 
+
+class InvalidArgumentError(FileSystemError):
+    code = "invalid_argument"
+
+    def __init__(self, field: str, detail: str) -> None:
+        super().__init__(f"Invalid {field}: {detail}")
+
+
+class InvalidPatchPathError(FileSystemError):
+    code = "invalid_patch_path"
+
+    def __init__(self, path: str, detail: str) -> None:
+        super().__init__(f"Invalid patch path '{path}': {detail}")
+
+
+class PatchConflictError(FileSystemError):
+    code = "patch_conflict"
+
+    def __init__(self, path: str, detail: str) -> None:
+        super().__init__(f"Patch conflict in '{path}': {detail}")
+
+
+class GitRepositoryOutsideRootError(FileSystemError):
+    code = "git_repo_outside_root"
+
+    def __init__(self, repo: str, root: str) -> None:
+        super().__init__(f"Git repository '{repo}' is outside allowed root '{root}'")
+
+
+class ExecutionDisabledError(FileSystemError):
+    code = "execution_disabled"
+
+    def __init__(self) -> None:
+        super().__init__("Command execution is disabled; set MCP_FS_ALLOW_EXEC=true to enable it")
+

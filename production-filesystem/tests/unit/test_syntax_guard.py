@@ -6,8 +6,6 @@ before it reaches disk, and correctly passes valid Python and non-Python files.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from mcp_fs.errors import SyntaxValidationError

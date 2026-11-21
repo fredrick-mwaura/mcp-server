@@ -37,6 +37,7 @@ def read_file(
     offset: int = 1,
     limit: int = 200,
     max_read_bytes: int = 1_000_000,
+    max_output_bytes: int | None = None,
 ) -> dict[str, object]:
     """Read a slice of an approved file with line-number prefixes.
 
@@ -57,6 +58,7 @@ def read_file(
         offset=offset,
         limit=limit,
         max_read_bytes=max_read_bytes,
+        max_output_bytes=max_output_bytes,
     )
 
 
